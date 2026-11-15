@@ -5,7 +5,7 @@ const flat = (n: number): Candle[] => Array.from({ length: n }, (_, i) => ({ t: 
 const build = (leginUp: boolean, outUp: boolean, outVol = 400) => {
   const c = flat(20);
   c.push(leginUp ? { t: 20, o: 100, h: 104.2, l: 99.8, c: 104, v: 200 } : { t: 20, o: 100, h: 100.2, l: 95.8, c: 96, v: 200 });
-  const b = c[20].c;
+  const b = c[20]!.c;
   c.push({ t: 21, o: b, h: b + 1, l: b - 1, c: b + 0.2, v: 120 });
   c.push(outUp ? { t: 22, o: b, h: b + 9.2, l: b - 0.2, c: b + 9, v: outVol } : { t: 22, o: b, h: b + 0.2, l: b - 9.2, c: b - 9, v: outVol });
   return c;
@@ -32,7 +32,7 @@ describe("Legin-Boring-Legout", () => {
   });
   it("rejects legin with wick over 40%", () => {
     const c = build(true, true);
-    c[20] = { ...c[20], h: 108 };
+    c[20] = { ...c[20]!, h: 108 };
     expect(detectAt(c, 20)).toBeNull();
   });
   it("order levels for bearish", () => {

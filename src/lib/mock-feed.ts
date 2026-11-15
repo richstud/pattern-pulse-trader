@@ -24,7 +24,7 @@ function randomCandle(prev: number, vol: number, t: number): Candle {
 /** Advance a series by one tick; occasionally injects a Legin-Boring-Legout sequence. */
 export function advance(series: Candle[], symbol: string, injectChance = 0.03): Candle[] {
   const p = BASE[symbol] ?? 100, vol = p * 0.0008;
-  const last = series[series.length - 1];
+  const last = series[series.length - 1]!;
   let t = last.t + 1;
   const add: Candle[] = [];
   if (Math.random() < injectChance) {

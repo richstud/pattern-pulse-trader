@@ -14,8 +14,8 @@ export const trueRange = (c: Candle, prev?: Candle) =>
 export function atrAt(candles: Candle[], i: number, period = 14): number {
   const start = Math.max(1, i - period);
   let sum = 0, n = 0;
-  for (let k = start; k < i; k++) { sum += trueRange(candles[k], candles[k - 1]); n++; }
-  return n ? sum / n : trueRange(candles[i]);
+  for (let k = start; k < i; k++) { sum += trueRange(candles[k]!, candles[k - 1]); n++; }
+  return n ? sum / n : trueRange(candles[i]!);
 }
 
 /** Body share of the full range (0..1). 0.6 => body:wick 60:40. */
@@ -27,7 +27,7 @@ export const gradeBody = (r: number) => (r >= 0.8 ? "Perfect" : r >= 0.7 ? "Aver
 export function detectAt(candles: Candle[], i: number, rrMultiple = 2, period = 14) {
   const legin = candles[i], base = candles[i + 1];
   if (!legin || !base || i < 1) return null;
-  const trIn = trueRange(legin, candles[i - 1]);
+  const trIn = trueRange(legin, candles[i - 1]!);
   const trBase = trueRange(base, legin);
   if (!(trIn > atrAt(candles, i, period)) || bodyRatio(legin) < MIN_BODY_RATIO) return null;
   if (!(trBase < atrAt(candles, i + 1, period))) return null;
@@ -37,7 +37,7 @@ export function detectAt(candles: Candle[], i: number, rrMultiple = 2, period = 
   for (let k = 1 as 1 | 2 | 3; k <= 3; k = (k + 1) as 1 | 2 | 3) {
     const out = candles[i + 1 + k];
     if (!out) break;
-    const trOut = trueRange(out, candles[i + k]);
+    const trOut = trueRange(out, candles[i + k]!);
     if (trOut > atrAt(candles, i + 1 + k, period) && bodyRatio(out) >= MIN_BODY_RATIO && trOut >= 2 * trIn && out.v > legin.v) {
       const inUp = legin.c > legin.o, outUp = out.c > out.o;
       const type: PatternType = outUp ? (inUp ? "RBR" : "DBR") : inUp ? "RBD" : "DBD";

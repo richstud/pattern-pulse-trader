@@ -192,7 +192,7 @@ function Dashboard() {
   );
 }
 
-function Cell({ candles, sig }: { candles?: Candle[]; sig?: Signal }) {
+function Cell({ candles, sig }: { candles?: Candle[] | undefined; sig?: Signal | undefined }) {
   const fresh = sig && Date.now() - sig.time < 15000;
   const pts = candles?.slice(-30) ?? [];
   const lo = Math.min(...pts.map((c) => c.l)), hi = Math.max(...pts.map((c) => c.h));
@@ -236,9 +236,9 @@ function SignalTable({ signals }: { signals: Signal[] }) {
 
 function DeployTab({ files }: { files: Record<string, string> }) {
   const names = Object.keys(files);
-  const [sel, setSel] = useState(names[0]);
+  const [sel, setSel] = useState<string>(names[0]!);
   const download = (name: string) => {
-    const url = URL.createObjectURL(new Blob([files[name]], { type: "text/plain" }));
+    const url = URL.createObjectURL(new Blob([files[name] ?? ""], { type: "text/plain" }));
     const a = document.createElement("a"); a.href = url; a.download = name; a.click(); URL.revokeObjectURL(url);
   };
   return (
@@ -249,8 +249,8 @@ function DeployTab({ files }: { files: Record<string, string> }) {
       </div>
       <div className="rounded-md border border-border bg-card">
         <div className="flex items-center justify-between border-b border-border px-4 py-2 font-mono text-xs"><span>{sel}</span>
-          <div className="flex gap-2"><Button size="sm" variant="secondary" onClick={() => navigator.clipboard.writeText(files[sel])}>Copy</Button><Button size="sm" variant="secondary" onClick={() => download(sel)}>Download</Button></div></div>
-        <pre className="max-h-[560px] overflow-auto p-4 font-mono text-xs leading-relaxed">{files[sel]}</pre>
+          <div className="flex gap-2"><Button size="sm" variant="secondary" onClick={() => navigator.clipboard.writeText(files[sel] ?? "")}>Copy</Button><Button size="sm" variant="secondary" onClick={() => download(sel)}>Download</Button></div></div>
+        <pre className="max-h-[560px] overflow-auto p-4 font-mono text-xs leading-relaxed">{files[sel] ?? ""}</pre>
       </div>
     </div>
   );
