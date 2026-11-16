@@ -1,4 +1,4 @@
-export const deployFiles = (cfg: { symbols: string[]; timeframes: string[]; rr: number; accountId: string }) => ({
+export const deployFiles = (cfg: { symbols: string[]; timeframes: Record<string, string[]>; rr: number; accountId: string }) => ({
   Dockerfile: `FROM python:3.12-slim
 WORKDIR /app
 RUN pip install --no-cache-dir ctrader-open-api twisted pyyaml
@@ -15,8 +15,9 @@ CTRADER_CLIENT_SECRET=
 CTRADER_ACCESS_TOKEN=
 CTRADER_ACCOUNT_ID=${cfg.accountId}
 CTRADER_HOST=demo.ctraderapi.com   # live.ctraderapi.com for live`,
-  "config.yaml": `symbols: [${cfg.symbols.join(", ")}]
-timeframes: [${cfg.timeframes.map((t) => `"${t}"`).join(", ")}]
+  "config.yaml": `# each symbol has its own timeframes
+watchlist:
+${cfg.symbols.map((s) => `  ${s}: [${(cfg.timeframes[s] ?? []).map((t) => `"${t}"`).join(", ")}]`).join("\n")}
 atr_period: 14
 min_body_ratio: 0.60      # body:wick 60:40 minimum
 size_multiple: 2.0        # legin >= 2x boring, legout >= 2x legin

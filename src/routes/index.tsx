@@ -8,14 +8,14 @@ import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { scanLatest, gradeBody, type Candle, type Signal } from "@/lib/patterns";
-import { SYMBOLS, TIMEFRAMES, MAX_SYMBOLS, MAX_TIMEFRAMES, seedCandles, advance, digits } from "@/lib/mock-feed";
+import { SYMBOLS, SYMBOL_GROUPS, TIMEFRAMES, MAX_SYMBOLS, MAX_TIMEFRAMES, seedCandles, advance, digits } from "@/lib/mock-feed";
 import { deployFiles } from "@/lib/deploy-files";
 
 export const Route = createFileRoute("/")({
   head: () => ({
     meta: [
       { title: "LBL Scanner — Pepperstone cTrader pattern automation" },
-      { name: "description", content: "Scan up to 6 symbols across 13 timeframes for Legin-Boring-Legout setups and auto-calculate limit orders." },
+      { name: "description", content: "Scan up to 6 Pepperstone symbols, each with its own set of up to 13 timeframes, for Legin-Boring-Legout setups and auto-calculate limit orders." },
       { property: "og:title", content: "LBL Scanner — cTrader pattern automation" },
       { property: "og:description", content: "Legin-Boring-Legout scanner with limit price, stop loss and VPS export." },
       { property: "og:type", content: "website" },
@@ -26,11 +26,17 @@ export const Route = createFileRoute("/")({
 });
 
 type Settings = { clientId: string; clientSecret: string; accessToken: string; accountId: string; mock: boolean; autoExecute: boolean; rr: number };
+const DEFAULT_TFS = ["15 SEC", "30 SEC", "1 MIN", "5 MIN", "15 MIN", "1 HR"];
 const DEFAULT_SETTINGS: Settings = { clientId: "", clientSecret: "", accessToken: "", accountId: "", mock: true, autoExecute: true, rr: 2 };
 
 function Dashboard() {
   const [symbols, setSymbols] = useState<string[]>(["US100", "EURUSD", "GBPUSD", "XAUUSD", "US500", "BTCUSD"]);
-  const [tfs, setTfs] = useState<string[]>(["15 SEC", "30 SEC", "1 MIN", "5 MIN", "15 MIN", "1 HR"]);
+  const [tfMap, setTfMap] = useState<Record<string, string[]>>({});
+  const [editing, setEditing] = useState("US100");
+  const [query, setQuery] = useState("");
+  const tfsOf = (s: string) => tfMap[s] ?? DEFAULT_TFS;
+  const pairs = useMemo(() => symbols.flatMap((s) => tfsOf(s).map((tf) => [s, tf] as const)), [symbols, tfMap]);
+  const allTfs = useMemo(() => TIMEFRAMES.filter((t) => symbols.some((s) => tfsOf(s).includes(t))), [symbols, tfMap]);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [series, setSeries] = useState<Record<string, Candle[]>>({});
   const [signals, setSignals] = useState<Signal[]>([]);
@@ -49,7 +55,7 @@ function Dashboard() {
       setSeries((prev) => {
         const next: Record<string, Candle[]> = {};
         const found: Signal[] = [];
-        for (const s of symbols) for (const tf of tfs) {
+        for (const [s, tf] of pairs) {
           const key = `${s}|${tf}`;
           const cur = advance(prev[key] ?? seedCandles(s), s);
           next[key] = cur;
@@ -66,7 +72,7 @@ function Dashboard() {
       setSignals((old) => old.map((x) => (x.status === "PLACED" && Math.random() < 0.08 ? { ...x, status: "FILLED" } : x)));
     }, 1500);
     return () => clearInterval(id);
-  }, [running, symbols, tfs, settings.mock, settings.rr, settings.autoExecute]);
+  }, [running, pairs, settings.mock, settings.rr, settings.autoExecute]);
 
   const latestByCell = useMemo(() => {
     const m: Record<string, Signal> = {};
@@ -96,7 +102,7 @@ function Dashboard() {
         </div>
         <div className="flex items-center gap-4 font-mono text-xs">
           <span className="flex items-center gap-2"><span className={`h-2 w-2 rounded-full ${statusColor} ${running ? "animate-pulse" : ""}`} />{status}</span>
-          <span className="text-muted-foreground">{symbols.length}/{MAX_SYMBOLS} SYM · {tfs.length}/{MAX_TIMEFRAMES} TF · {signals.length} SIG</span>
+          <span className="text-muted-foreground">{symbols.length}/{MAX_SYMBOLS} SYM · {pairs.length} FEEDS · {signals.length} SIG</span>
           <Button size="sm" variant={running ? "secondary" : "default"} onClick={() => setRunning(!running)}>{running ? "Pause" : "Resume"}</Button>
         </div>
       </header>
@@ -116,13 +122,13 @@ function Dashboard() {
             <table className="w-full border-collapse font-mono text-xs">
               <thead><tr className="bg-card">
                 <th className="sticky left-0 bg-card px-3 py-2 text-left text-muted-foreground">SYMBOL</th>
-                {tfs.map((tf) => <th key={tf} className="px-2 py-2 text-muted-foreground">{tf}</th>)}
+                {allTfs.map((tf) => <th key={tf} className="px-2 py-2 text-muted-foreground">{tf}</th>)}
               </tr></thead>
               <tbody>
                 {symbols.map((s) => (
                   <tr key={s} className="border-t border-border">
-                    <td className="sticky left-0 bg-background px-3 py-2 font-semibold">{s}<div className="text-[10px] font-normal text-muted-foreground">{series[`${s}|${tfs[0]}`]?.at(-1)?.c.toFixed(digits(s)) ?? "—"}</div></td>
-                    {tfs.map((tf) => <Cell key={tf} candles={series[`${s}|${tf}`]} sig={latestByCell[`${s}|${tf}`]} />)}
+                    <td className="sticky left-0 bg-background px-3 py-2 font-semibold">{s}<div className="text-[10px] font-normal text-muted-foreground">{series[`${s}|${tfsOf(s)[0]}`]?.at(-1)?.c.toFixed(digits(s)) ?? "—"}</div></td>
+                    {allTfs.map((tf) => tfsOf(s).includes(tf) ? <Cell key={tf} candles={series[`${s}|${tf}`]} sig={latestByCell[`${s}|${tf}`]} /> : <td key={tf} className="px-2 py-2 text-center text-muted-foreground/40">·</td>)}
                   </tr>
                 ))}
               </tbody>
@@ -136,25 +142,52 @@ function Dashboard() {
         <TabsContent value="setup" className="mt-4 grid gap-6 md:grid-cols-2">
           <section className="rounded-md border border-border bg-card p-4">
             <h2 className="mb-1 font-semibold">Symbols <span className="font-mono text-xs text-muted-foreground">({symbols.length}/{MAX_SYMBOLS})</span></h2>
-            <p className="mb-3 text-xs text-muted-foreground">Pick up to 6 to watch at the same time.</p>
-            <div className="grid grid-cols-3 gap-2">
-              {SYMBOLS.map((s) => (
-                <label key={s} className="flex items-center gap-2 font-mono text-sm">
-                  <Checkbox checked={symbols.includes(s)} disabled={!symbols.includes(s) && symbols.length >= MAX_SYMBOLS} onCheckedChange={() => toggle(symbols, setSymbols, s, MAX_SYMBOLS)} />{s}
-                </label>
-              ))}
+            <p className="mb-3 text-xs text-muted-foreground">Pepperstone cTrader catalogue. Pick up to 6. Type any other symbol name and press Enter to add it.</p>
+            <Input placeholder="Search or add symbol…" value={query} onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => { const v = query.trim(); if (e.key === "Enter" && v && !symbols.includes(v) && symbols.length < MAX_SYMBOLS) { setSymbols([...symbols, v]); setEditing(v); setQuery(""); } }} className="mb-3 font-mono" />
+            <div className="max-h-96 space-y-3 overflow-y-auto pr-1">
+              {Object.entries(SYMBOL_GROUPS).map(([g, list]) => {
+                const shown = list.filter((s) => s.toLowerCase().includes(query.toLowerCase()));
+                if (!shown.length) return null;
+                return (
+                  <div key={g}>
+                    <div className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">{g}</div>
+                    <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3">
+                      {shown.map((s) => (
+                        <label key={s} className="flex items-center gap-2 font-mono text-xs">
+                          <Checkbox checked={symbols.includes(s)} disabled={!symbols.includes(s) && symbols.length >= MAX_SYMBOLS} onCheckedChange={() => { toggle(symbols, setSymbols, s, MAX_SYMBOLS); if (!symbols.includes(s)) setEditing(s); }} />{s}
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
+            {symbols.filter((s) => !SYMBOLS.includes(s)).length > 0 && <p className="mt-2 font-mono text-xs">Custom: {symbols.filter((s) => !SYMBOLS.includes(s)).map((s) => <button key={s} className="mr-2 underline" onClick={() => setSymbols(symbols.filter((x) => x !== s))}>{s} ×</button>)}</p>}
           </section>
           <section className="rounded-md border border-border bg-card p-4">
-            <h2 className="mb-1 font-semibold">Timeframes <span className="font-mono text-xs text-muted-foreground">({tfs.length}/{MAX_TIMEFRAMES})</span></h2>
-            <p className="mb-3 text-xs text-muted-foreground">Pick up to 13 active timeframes.</p>
-            <div className="grid grid-cols-3 gap-2">
-              {TIMEFRAMES.map((t) => (
-                <label key={t} className="flex items-center gap-2 font-mono text-sm">
-                  <Checkbox checked={tfs.includes(t)} disabled={!tfs.includes(t) && tfs.length >= MAX_TIMEFRAMES} onCheckedChange={() => toggle(tfs, (v) => setTfs(TIMEFRAMES.filter((x) => v.includes(x))), t, MAX_TIMEFRAMES)} />{t}
-                </label>
+            <h2 className="mb-1 font-semibold">Timeframes per symbol</h2>
+            <p className="mb-3 text-xs text-muted-foreground">Each symbol has its own timeframes — up to {MAX_TIMEFRAMES} each. Choose a symbol, then tick its timeframes.</p>
+            <div className="mb-3 flex flex-wrap gap-1.5">
+              {symbols.map((s) => (
+                <Button key={s} size="sm" variant={editing === s ? "default" : "outline"} className="font-mono text-xs" onClick={() => setEditing(s)}>{s} <span className="ml-1 opacity-70">{tfsOf(s).length}</span></Button>
               ))}
             </div>
+            {symbols.includes(editing) ? (() => {
+              const cur = tfsOf(editing);
+              const set = (v: string[]) => setTfMap({ ...tfMap, [editing]: TIMEFRAMES.filter((x) => v.includes(x)) });
+              return (<>
+                <div className="mb-2 flex items-center justify-between font-mono text-xs"><span>{editing}: {cur.length}/{MAX_TIMEFRAMES}</span>
+                  <button className="underline text-muted-foreground" onClick={() => { const n: Record<string, string[]> = { ...tfMap }; symbols.forEach((s) => (n[s] = cur)); setTfMap(n); }}>Copy to all symbols</button></div>
+                <div className="grid grid-cols-3 gap-2">
+                  {TIMEFRAMES.map((t) => (
+                    <label key={t} className="flex items-center gap-2 font-mono text-sm">
+                      <Checkbox checked={cur.includes(t)} disabled={!cur.includes(t) && cur.length >= MAX_TIMEFRAMES} onCheckedChange={() => toggle(cur, set, t, MAX_TIMEFRAMES)} />{t}
+                    </label>
+                  ))}
+                </div>
+              </>);
+            })() : <p className="text-xs text-muted-foreground">Select a symbol above.</p>}
           </section>
           <section className="rounded-md border border-border bg-card p-4 md:col-span-2 text-sm">
             <h2 className="mb-2 font-semibold">Pattern rules</h2>
@@ -186,7 +219,7 @@ function Dashboard() {
           <p className="text-xs text-muted-foreground">Keys are kept only in this browser. For live trading, put them in the VPS package's .env file.</p>
         </TabsContent>
 
-        <TabsContent value="deploy" className="mt-4"><DeployTab files={deployFiles({ symbols, timeframes: tfs, rr: settings.rr, accountId: settings.accountId })} /></TabsContent>
+        <TabsContent value="deploy" className="mt-4"><DeployTab files={deployFiles({ symbols, timeframes: Object.fromEntries(symbols.map((s) => [s, tfsOf(s)])), rr: settings.rr, accountId: settings.accountId })} /></TabsContent>
       </Tabs>
     </div>
   );
