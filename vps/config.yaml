@@ -1,9 +1,10 @@
 # Each symbol has its own timeframes. Native cTrader periods:
 # M1 M2 M3 M4 M5 M10 M15 M30 H1 H4 H12 D1 W1 MN1
 # Custom minute periods built from M1: M45 M75 M125 H2
-# Second periods (S15/S30/S45) need tick aggregation - not supported yet.
+# Second periods S1 S5 S10 S15 S30 S45 are built live from ticks (volume = tick count).
+# They start empty and need ~20 bars of history before signals appear.
 watchlist:
-  XAUUSD: [M1, M3, M5, M15]
+  XAUUSD: [S15, S30, S45, M1, M3, M5, M15]
   US100:  [M1, M5, M15, H1]
   EURUSD: [M5, M15, H1]
 atr_period: 14

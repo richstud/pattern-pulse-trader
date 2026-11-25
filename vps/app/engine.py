@@ -6,7 +6,7 @@ from ctrader_open_api import Client, Protobuf, TcpProtocol, EndPoints
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOAApplicationAuthReq, ProtoOAAccountAuthReq, ProtoOASymbolsListReq,
     ProtoOASymbolByIdReq, ProtoOAGetTrendbarsReq, ProtoOANewOrderReq, ProtoOAErrorRes,
-    ProtoOAGetAccountListByAccessTokenReq)
+    ProtoOAGetAccountListByAccessTokenReq, ProtoOASubscribeSpotsReq, ProtoOASpotEvent)
 from ctrader_open_api.messages.OpenApiModelMessages_pb2 import ProtoOATrendbarPeriod, ProtoOAOrderType, ProtoOATradeSide
 from . import db
 from .patterns import detect
@@ -25,6 +25,12 @@ AUTO = os.environ.get("AUTO_EXECUTE", "false").lower() == "true"
 NATIVE = {"M1": 1, "M2": 2, "M3": 3, "M4": 4, "M5": 5, "M10": 10, "M15": 15, "M30": 30,
           "H1": 60, "H4": 240, "H12": 720, "D1": 1440, "W1": 10080}
 CUSTOM = {"M45": 45, "M75": 75, "M125": 125, "H2": 120}  # built from M1 bars
+SECONDS = {"S1": 1, "S5": 5, "S10": 10, "S15": 15, "S30": 30, "S45": 45}  # built live from ticks
+tick_bars = {}     # (sym, tf) -> list of closed bars (in memory, newest last)
+cur_bar = {}       # (sym, tf) -> bar being built
+last_px = {}       # sym -> last bid
+by_symbol_id = {}  # symbolId -> name
+MAX_TICK_BARS = 200
 
 client = Client(HOST, EndPoints.PROTOBUF_PORT, TcpProtocol)
 symbols = {}       # name -> {id, digits, lotSize}
@@ -142,6 +148,11 @@ def got_details(m, found):
     for s in m.symbol:
         symbols[by_id[s.symbolId]] = {"id": s.symbolId, "digits": s.digits, "lotSize": s.lotSize}
     ready = True
+    by_symbol_id.clear()
+    by_symbol_id.update({v["id"]: k for k, v in symbols.items()})
+    if any(tf in SECONDS for sym in symbols for tf in CFG["watchlist"].get(sym, [])):
+        r = ProtoOASubscribeSpotsReq(ctidTraderAccountId=ACC, symbolId=[v["id"] for v in symbols.values()])
+        send(r).addCallback(lambda x: (check(x), log.info("live ticks subscribed: %s", ", ".join(symbols))))
     beat(True, f"{len(symbols)} symbols, auto_execute={AUTO}")
     log.info("ready: %s", ", ".join(symbols))
 
@@ -150,6 +161,7 @@ def on_disconnected(_, reason):
     ready = False
     bar_queue.clear()
     last_bar.clear()
+    cur_bar.clear()
     beat(False, f"disconnected: {reason}")
     log.warning("disconnected: %s - reconnecting in 5s", reason)
     reactor.callLater(5, client.startService)
@@ -185,7 +197,7 @@ def poll():
         for tf in tfs:
             mins = NATIVE.get(tf) or CUSTOM.get(tf)
             if not mins:
-                continue  # second periods unsupported
+                continue  # second periods are built from live ticks
             closed = now // (mins * 60000) * mins * 60000  # start of the current (open) bar
             if last_bar.get((sym, tf)) == closed:
                 continue
@@ -222,7 +234,58 @@ def scan(sym, tf, m, mins, closed, native):
     bars = to_bars(m)
     if not native:
         bars = aggregate(bars, mins)
-    bars = [b for b in bars if b["t"] < closed]  # closed bars only
+    scan_bars(sym, tf, [b for b in bars if b["t"] < closed])  # closed bars only
+
+def on_tick(sym, price, ts_ms):
+    """Feed one tick into every second-timeframe bar for this symbol."""
+    for tf in CFG["watchlist"].get(sym, []):
+        secs = SECONDS.get(tf)
+        if not secs:
+            continue
+        key = (sym, tf)
+        start = ts_ms // (secs * 1000) * secs * 1000
+        b = cur_bar.get(key)
+        if b and b["t"] != start:
+            close_bar(key)
+            b = None
+        if not b:
+            cur_bar[key] = {"t": start, "o": price, "h": price, "l": price, "c": price, "v": 1}
+        else:
+            b["h"], b["l"], b["c"] = max(b["h"], price), min(b["l"], price), price
+            b["v"] += 1  # tick count used as volume
+
+def close_bar(key):
+    b = cur_bar.pop(key, None)
+    if not b:
+        return
+    lst = tick_bars.setdefault(key, [])
+    lst.append(b)
+    del lst[:-MAX_TICK_BARS]
+    try:
+        scan_bars(key[0], key[1], lst)
+    except Exception as e:
+        log.exception("scan %s %s failed: %s", key[0], key[1], e)
+
+def flush_bars():
+    """Close second bars whose time has passed even if no new tick arrived."""
+    now = int(time.time() * 1000)
+    for key, b in list(cur_bar.items()):
+        if now >= b["t"] + SECONDS[key[1]] * 1000:
+            close_bar(key)
+
+def on_message(_, msg):
+    if msg.payloadType != ProtoOASpotEvent().payloadType:
+        return
+    m = Protobuf.extract(msg)
+    sym = by_symbol_id.get(m.symbolId)
+    if not sym:
+        return
+    if m.HasField("bid"):
+        last_px[sym] = m.bid / 100000
+    if sym in last_px:
+        on_tick(sym, last_px[sym], int(time.time() * 1000))
+
+def scan_bars(sym, tf, bars):
     if len(bars) < CFG["atr_period"] + 5:
         return
     # newest completed setup: Legout is the last closed bar, offset 1..3
@@ -271,9 +334,10 @@ if __name__ == "__main__":
     log.info("env=%s account=%s auto_execute=%s", ENV, ACC, AUTO)
     client.setConnectedCallback(on_connected)
     client.setDisconnectedCallback(on_disconnected)
-    client.setMessageReceivedCallback(lambda c, m: None)
+    client.setMessageReceivedCallback(on_message)
     client.startService()
     task.LoopingCall(poll).start(5.0)
     task.LoopingCall(drain).start(PACE)
+    task.LoopingCall(flush_bars).start(0.5)
     task.LoopingCall(lambda: ready and beat(True, f"{len(symbols)} symbols, auto_execute={AUTO}")).start(30.0)
     reactor.run()
