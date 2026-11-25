@@ -30,6 +30,38 @@ client = Client(HOST, EndPoints.PROTOBUF_PORT, TcpProtocol)
 symbols = {}       # name -> {id, digits, lotSize}
 last_bar = {}      # (sym, tf) -> last processed bar ts
 ready = False
+bar_queue = []     # pending (sym, tf, req, mins, closed, native) trendbar requests
+PACE = 0.35        # seconds between trendbar requests (cTrader allows ~5/s for history)
+
+# Broker names differ (e.g. Pepperstone uses NAS100 for US100). Tried in order.
+ALIASES = {
+    "US100": ["NAS100", "USTEC", "NDX100", "US100.cash", "NAS100.cash"],
+    "US500": ["SPX500", "US500.cash", "SP500"],
+    "US30": ["DJ30", "WS30", "US30.cash"],
+    "GER40": ["GER30", "DE40", "GER40.cash"],
+    "UK100": ["UK100.cash", "FTSE100"],
+    "XAUUSD": ["GOLD"], "XAGUSD": ["SILVER"],
+    "USOIL": ["SpotCrude", "WTI", "XTIUSD"], "UKOIL": ["SpotBrent", "BRENT", "XBRUSD"],
+}
+
+def norm(n):
+    return n.upper().replace(".CASH", "").replace(".", "").replace("_", "").replace("-", "")
+
+def resolve(wanted, available):
+    """Map each configured name to the broker's real symbol name, or None."""
+    exact = {a: a for a in available}
+    by_norm = {}
+    for a in available:
+        by_norm.setdefault(norm(a), a)
+    out = {}
+    for w in wanted:
+        hit = None
+        for cand in [w] + ALIASES.get(w.upper(), []):
+            hit = exact.get(cand) or by_norm.get(norm(cand))
+            if hit:
+                break
+        out[w] = hit
+    return out
 
 def beat(ok, detail=""):
     try:
@@ -89,11 +121,16 @@ def account_auth():
 def load_symbols():
     def got(m):
         m = check(m)
-        wanted = set(CFG["watchlist"])
-        found = {s.symbolName: s.symbolId for s in m.symbol if s.symbolName in wanted}
-        missing = wanted - set(found)
-        if missing:
-            log.warning("symbols not on this account: %s", ", ".join(sorted(missing)))
+        ids = {s.symbolName: s.symbolId for s in m.symbol}
+        mapping = resolve(CFG["watchlist"], ids)
+        found = {}
+        for w, real in mapping.items():
+            if real is None:
+                log.warning("symbol not on this account: %s", w)
+                continue
+            if real != w:
+                log.info("symbol %s -> broker name %s", w, real)
+            found[w] = ids[real]
         req = ProtoOASymbolByIdReq(ctidTraderAccountId=ACC, symbolId=list(found.values()))
         send(req).addCallback(lambda d: got_details(d, found))
     send(ProtoOASymbolsListReq(ctidTraderAccountId=ACC)).addCallback(got)
@@ -111,6 +148,8 @@ def got_details(m, found):
 def on_disconnected(_, reason):
     global ready
     ready = False
+    bar_queue.clear()
+    last_bar.clear()
     beat(False, f"disconnected: {reason}")
     log.warning("disconnected: %s - reconnecting in 5s", reason)
     reactor.callLater(5, client.startService)
@@ -156,8 +195,28 @@ def poll():
             req = ProtoOAGetTrendbarsReq(ctidTraderAccountId=ACC, symbolId=symbols[sym]["id"],
                 period=ProtoOATrendbarPeriod.Value(base_tf),
                 fromTimestamp=closed - mins * 60000 * 80, toTimestamp=closed)
-            send(req).addCallback(lambda m, s=sym, t=tf, mn=mins, c=closed, nat=(tf in NATIVE):
-                                  scan(s, t, check(m), mn, c, nat))
+            bar_queue.append((sym, tf, req, mins, closed, tf in NATIVE))
+
+def drain():
+    """Send one queued trendbar request; on rate limit, retry it later."""
+    if not ready or not bar_queue:
+        return
+    sym, tf, req, mins, closed, native = item = bar_queue.pop(0)
+    def ok(m):
+        try:
+            res = check(m)
+        except RuntimeError as e:
+            if "BLOCKED_PAYLOAD_TYPE" in str(e) or "rate" in str(e).lower():
+                log.warning("rate limited on %s %s - retrying", sym, tf)
+                bar_queue.append(item)
+            else:
+                log.error("trendbars %s %s: %s", sym, tf, e)
+            return
+        try:
+            scan(sym, tf, res, mins, closed, native)
+        except Exception as e:
+            log.exception("scan %s %s failed: %s", sym, tf, e)
+    send(req).addCallback(ok)
 
 def scan(sym, tf, m, mins, closed, native):
     bars = to_bars(m)
@@ -215,5 +274,6 @@ if __name__ == "__main__":
     client.setMessageReceivedCallback(lambda c, m: None)
     client.startService()
     task.LoopingCall(poll).start(5.0)
+    task.LoopingCall(drain).start(PACE)
     task.LoopingCall(lambda: ready and beat(True, f"{len(symbols)} symbols, auto_execute={AUTO}")).start(30.0)
     reactor.run()
