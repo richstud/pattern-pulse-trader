@@ -1,0 +1,6 @@
+# Netlify hosts the dashboard only (no Netlify Functions). /api/* is proxied to the VPS.
+[[redirects]]
+  from = "/api/*"
+  to = "http://103.77.155.79:8000/:splat"
+  status = 200
+  force = true

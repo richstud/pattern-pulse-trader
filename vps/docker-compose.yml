@@ -1,0 +1,38 @@
+# Runs everything on the VPS: database, API, cTrader engine.
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: lbl
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: lbl
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lbl"]
+      interval: 5s
+      retries: 10
+    # no "ports:" -> database is NOT reachable from the internet
+
+  api:
+    build: .
+    restart: unless-stopped
+    command: uvicorn app.api:app --host 0.0.0.0 --port 8000
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://lbl:${DB_PASSWORD}@db:5432/lbl
+    depends_on: { db: { condition: service_healthy } }
+    ports: ["8000:8000"]
+
+  engine:
+    build: .
+    restart: unless-stopped
+    command: python -m app.engine
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://lbl:${DB_PASSWORD}@db:5432/lbl
+    depends_on: { db: { condition: service_healthy } }
+    volumes: ["./logs:/app/logs"]
+
+volumes:
+  pgdata:
