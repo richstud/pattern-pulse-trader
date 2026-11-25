@@ -5,7 +5,8 @@ from twisted.internet import reactor, task
 from ctrader_open_api import Client, Protobuf, TcpProtocol, EndPoints
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOAApplicationAuthReq, ProtoOAAccountAuthReq, ProtoOASymbolsListReq,
-    ProtoOASymbolByIdReq, ProtoOAGetTrendbarsReq, ProtoOANewOrderReq, ProtoOAErrorRes)
+    ProtoOASymbolByIdReq, ProtoOAGetTrendbarsReq, ProtoOANewOrderReq, ProtoOAErrorRes,
+    ProtoOAGetAccountListByAccessTokenReq)
 from ctrader_open_api.messages.OpenApiModelMessages_pb2 import ProtoOATrendbarPeriod, ProtoOAOrderType, ProtoOATradeSide
 from . import db
 from .patterns import detect
@@ -58,8 +59,32 @@ def on_connected(_):
     send(r).addCallback(lambda m: (check(m), account_auth()))
 
 def account_auth():
-    r = ProtoOAAccountAuthReq(ctidTraderAccountId=ACC, accessToken=os.environ["CTRADER_ACCESS_TOKEN"])
-    send(r).addCallback(lambda m: (check(m), load_symbols()))
+    # CTRADER_ACCOUNT_ID may be the login shown in cTrader (traderLogin) or the internal
+    # ctidTraderAccountId. Ask cTrader which accounts this token can use and resolve it.
+    global ACC
+    token = os.environ["CTRADER_ACCESS_TOKEN"]
+    def got(m):
+        global ACC
+        m = check(m)
+        want_live = ENV == "live"
+        accs = list(m.ctidTraderAccount)
+        for a in accs:
+            log.info("token account: login=%s ctid=%s %s", a.traderLogin, a.ctidTraderAccountId,
+                     "LIVE" if a.isLive else "DEMO")
+        log.info("token scope: %s", "trading" if m.permissionScope == 1 else "account info only")
+        match = [a for a in accs if ACC in (a.traderLogin, a.ctidTraderAccountId)]
+        if not match:
+            msg = f"account {ACC} is not authorized for this token"
+            log.error(msg); beat(False, msg); return
+        a = match[0]
+        if a.isLive != want_live:
+            msg = f"account {ACC} is {'LIVE' if a.isLive else 'DEMO'} but CTRADER_ENV={ENV}"
+            log.error(msg); beat(False, msg); return
+        ACC = a.ctidTraderAccountId
+        log.info("using ctidTraderAccountId=%s (login %s)", ACC, a.traderLogin)
+        r = ProtoOAAccountAuthReq(ctidTraderAccountId=ACC, accessToken=token)
+        send(r).addCallback(lambda x: (check(x), log.info("account authorized"), load_symbols()))
+    send(ProtoOAGetAccountListByAccessTokenReq(accessToken=token)).addCallback(got)
 
 def load_symbols():
     def got(m):
