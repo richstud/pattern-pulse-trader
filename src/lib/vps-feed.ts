@@ -56,3 +56,32 @@ export async function readVps(base: string, key: string, signal: AbortSignal) {
   }));
   return { heartbeat, watchlist, signals };
 }
+const SUPPORTED = new Set(["S1","S5","S10","S15","S30","S45","M1","M2","M3","M4","M5","M10","M15","M30","M45","M75","M125","H1","H2","H4","H12","D1","W1"]);
+/** "15 SEC" -> "S15", "1 HR" -> "H1"; null when the VPS engine cannot scan that timeframe. */
+export function timeframeCode(label: string): string | null {
+  const m = /^(\d+) (SEC|MIN|HR|D|WK|W)$/.exec(label.trim());
+  if (!m) return null;
+  const unit: Record<string, string> = { SEC: "S", MIN: "M", HR: "H", D: "D", WK: "W", W: "W" };
+  const code = `${unit[m[2] ?? ""]}${m[1]}`;
+  return SUPPORTED.has(code) ? code : null;
+}
+export async function saveWatchlist(base: string, key: string, watchlist: Record<string, string[]>) {
+  const root = apiBase(base, window.location.origin);
+  const body: Record<string, string[]> = {};
+  for (const [sym, labels] of Object.entries(watchlist)) {
+    const codes = labels.map(timeframeCode).filter((c): c is string => !!c);
+    if (codes.length) body[sym] = codes;
+  }
+  if (!Object.keys(body).length) throw new Error("Pick at least one ticker with a timeframe.");
+  const response = await fetch(root + "config/watchlist", {
+    method: "PUT", headers: { "X-API-Key": key.trim(), "Content-Type": "application/json" },
+    body: JSON.stringify({ watchlist: body }), credentials: "omit", redirect: "error",
+  });
+  if (response.status === 401) throw new Error("API key rejected.");
+  if (response.status === 404 || response.status === 405) throw new Error("Your VPS is on an older version. Run git pull and docker compose up -d --build on the VPS.");
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(detail?.detail ?? `Save failed (${response.status}).`);
+  }
+  return body;
+}

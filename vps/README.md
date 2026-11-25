@@ -22,3 +22,6 @@ sudo ufw allow 22 && sudo ufw allow 8000 && sudo ufw enable
 - Placing orders needs a token with the "Account info and trading" scope.
 - Access tokens expire (~30 days); regenerate and update `.env`, then `docker compose restart engine`.
 - Second timeframes (15/30/45 SEC) are not supported yet.
+
+## Watchlist from the dashboard
+Pick tickers/timeframes in "Symbols & Timeframes" and press **Save & apply to VPS**. The API writes `config.yaml` (shared with the engine) and the engine restarts itself within seconds. First time only: `git pull && docker compose up -d --build`.

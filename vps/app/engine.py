@@ -17,6 +17,14 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s",
 log = logging.getLogger("engine")
 
 CFG = yaml.safe_load(open("config.yaml"))
+CFG_MTIME = os.path.getmtime("config.yaml")
+
+def watch_config():
+    """Exit when the dashboard saves a new watchlist; Docker restarts the engine with it."""
+    if os.path.getmtime("config.yaml") != CFG_MTIME:
+        log.info("config.yaml changed - restarting engine to apply new watchlist")
+        reactor.stop()
+        os._exit(0)
 ENV = os.environ.get("CTRADER_ENV", "demo").lower()
 HOST = EndPoints.PROTOBUF_LIVE_HOST if ENV == "live" else EndPoints.PROTOBUF_DEMO_HOST
 ACC = int(os.environ["CTRADER_ACCOUNT_ID"])
@@ -339,5 +347,6 @@ if __name__ == "__main__":
     task.LoopingCall(poll).start(5.0)
     task.LoopingCall(drain).start(PACE)
     task.LoopingCall(flush_bars).start(0.5)
+    task.LoopingCall(watch_config).start(3.0)
     task.LoopingCall(lambda: ready and beat(True, f"{len(symbols)} symbols, auto_execute={AUTO}")).start(30.0)
     reactor.run()

@@ -19,3 +19,15 @@ describe("VPS connection safety", () => {
     expect(timeframeLabel("H2")).toBe("2 HR");
   });
 });
+import { timeframeCode } from "./vps-feed";
+describe("timeframeCode", () => {
+  it("maps dashboard labels to VPS engine codes", () => {
+    expect(timeframeCode("15 SEC")).toBe("S15");
+    expect(timeframeCode("125 MIN")).toBe("M125");
+    expect(timeframeCode("2 HR")).toBe("H2");
+    expect(timeframeCode("1 D")).toBe("D1");
+  });
+  it("rejects timeframes the engine cannot scan", () => {
+    expect(timeframeCode("1 MN")).toBeNull();
+  });
+});

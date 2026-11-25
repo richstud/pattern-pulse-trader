@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { scanLatest, gradeBody, type Candle, type Signal } from "@/lib/patterns";
 import { SYMBOLS, SYMBOL_GROUPS, TIMEFRAMES, MAX_SYMBOLS, MAX_TIMEFRAMES, seedCandles, advance, digits } from "@/lib/mock-feed";
-import { readVps, heartbeatFresh, timeframeLabel, type Heartbeat, type DisplaySignal } from "@/lib/vps-feed";
+import { readVps, saveWatchlist, timeframeCode, heartbeatFresh, timeframeLabel, type Heartbeat, type DisplaySignal } from "@/lib/vps-feed";
 import { deployFiles } from "@/lib/deploy-files";
 
 export const Route = createFileRoute("/")({
@@ -45,6 +45,26 @@ function Dashboard() {
   const [lastRead, setLastRead] = useState<number | null>(null);
   const [refresh, setRefresh] = useState(0);
   const requestGeneration = useRef(0);
+  const [dirty, setDirty] = useState(false);
+  const [saveMsg, setSaveMsg] = useState("");
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    // Show what the VPS is scanning in the picker, unless the user has unsaved edits.
+    if (settings.mock || dirty || !Object.keys(serverWatchlist).length) return;
+    setSymbols(Object.keys(serverWatchlist));
+    setTfMap(Object.fromEntries(Object.entries(serverWatchlist).map(([k, v]) => [k, v.map(timeframeLabel)])));
+    setEditing((e) => (e in serverWatchlist ? e : Object.keys(serverWatchlist)[0] ?? e));
+  }, [serverWatchlist, settings.mock, dirty]);
+  const applyToVps = async () => {
+    if (!activeConnection) { setSaveMsg("Connect to the VPS first (VPS Connection tab)."); return; }
+    setSaving(true); setSaveMsg("");
+    try {
+      await saveWatchlist(activeConnection.url, activeConnection.key, Object.fromEntries(symbols.map((s) => [s, tfsPick(s)])));
+      setDirty(false); setSaveMsg("Saved. The VPS engine restarts with the new list in about 10 seconds."); setRefresh((v) => v + 1);
+    } catch (e) { setSaveMsg(e instanceof Error ? e.message : "Save failed."); }
+    finally { setSaving(false); }
+  };
+  const tfsPick = (s: string) => tfMap[s] ?? DEFAULT_TFS;
   const tfsOf = (s: string) => settings.mock ? tfMap[s] ?? DEFAULT_TFS : (serverWatchlist[s] ?? []).map(timeframeLabel);
   const displaySymbols = settings.mock ? symbols : Object.keys(serverWatchlist);
   const pairs = useMemo(() => displaySymbols.flatMap((s) => tfsOf(s).map((tf) => [s, tf] as const)), [symbols, tfMap, settings.mock, serverWatchlist]);
@@ -191,15 +211,17 @@ function Dashboard() {
         <TabsContent value="signals" className="mt-4"><SignalTable signals={signals} /></TabsContent>
 
         <TabsContent value="setup" className="mt-4 grid gap-6 md:grid-cols-2">
-          {!settings.mock && <div className="md:col-span-2"><h2 className="mb-2 font-semibold">VPS watchlist · {pairs.length} feeds</h2><p className="mb-3 text-xs text-muted-foreground">Read-only. Change the watchlist in the VPS config and rebuild the engine and API to apply it.</p>
+          {!settings.mock && <div className="md:col-span-2 rounded-md border border-border bg-card p-4"><div className="mb-2 flex flex-wrap items-center justify-between gap-3"><h2 className="font-semibold">VPS is scanning · {pairs.length} feeds</h2><Button onClick={applyToVps} disabled={saving || !activeConnection}>{saving ? "Saving…" : "Save & apply to VPS"}</Button></div>
+            <p className="mb-3 text-xs text-muted-foreground">{dirty ? "You have unsaved changes below." : "Pick tickers and timeframes below, then press Save & apply."} Second timeframes start empty and need a few minutes of live ticks.</p>
+            {saveMsg && <p role="status" className="mb-2 text-sm">{saveMsg}</p>}
             {Object.entries(serverWatchlist).map(([symbol, frames]) => <p key={symbol} className="mb-2 break-words font-mono text-xs"><strong>{symbol}</strong> · {frames.length} timeframes · {frames.map(timeframeLabel).join(", ")}</p>)}
           </div>}
-          <div className={!settings.mock ? "hidden" : "contents"}>
+          <div className="contents">
           <section className="rounded-md border border-border bg-card p-4">
             <h2 className="mb-1 font-semibold">Symbols <span className="font-mono text-xs text-muted-foreground">({symbols.length}/{MAX_SYMBOLS})</span></h2>
             <p className="mb-3 text-xs text-muted-foreground">Pepperstone cTrader catalogue. Pick up to 6. Type any other symbol name and press Enter to add it.</p>
             <Input placeholder="Search or add symbol…" value={query} onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={(e) => { const v = query.trim(); if (e.key === "Enter" && v && !symbols.includes(v) && symbols.length < MAX_SYMBOLS) { setSymbols([...symbols, v]); setEditing(v); setQuery(""); } }} className="mb-3 font-mono" />
+              onKeyDown={(e) => { const v = query.trim(); if (e.key === "Enter" && v && !symbols.includes(v) && symbols.length < MAX_SYMBOLS) { setDirty(true); setSymbols([...symbols, v]); setEditing(v); setQuery(""); } }} className="mb-3 font-mono" />
             <div className="max-h-96 space-y-3 overflow-y-auto pr-1">
               {Object.entries(SYMBOL_GROUPS).map(([g, list]) => {
                 const shown = list.filter((s) => s.toLowerCase().includes(query.toLowerCase()));
@@ -210,7 +232,7 @@ function Dashboard() {
                     <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3">
                       {shown.map((s) => (
                         <label key={s} className="flex items-center gap-2 font-mono text-xs">
-                          <Checkbox checked={symbols.includes(s)} disabled={!symbols.includes(s) && symbols.length >= MAX_SYMBOLS} onCheckedChange={() => { toggle(symbols, setSymbols, s, MAX_SYMBOLS); if (!symbols.includes(s)) setEditing(s); }} />{s}
+                          <Checkbox checked={symbols.includes(s)} disabled={!symbols.includes(s) && symbols.length >= MAX_SYMBOLS} onCheckedChange={() => { setDirty(true); toggle(symbols, setSymbols, s, MAX_SYMBOLS); if (!symbols.includes(s)) setEditing(s); }} />{s}
                         </label>
                       ))}
                     </div>
@@ -218,24 +240,24 @@ function Dashboard() {
                 );
               })}
             </div>
-            {symbols.filter((s) => !SYMBOLS.includes(s)).length > 0 && <p className="mt-2 font-mono text-xs">Custom: {symbols.filter((s) => !SYMBOLS.includes(s)).map((s) => <button key={s} className="mr-2 underline" onClick={() => setSymbols(symbols.filter((x) => x !== s))}>{s} ×</button>)}</p>}
+            {symbols.filter((s) => !SYMBOLS.includes(s)).length > 0 && <p className="mt-2 font-mono text-xs">Custom: {symbols.filter((s) => !SYMBOLS.includes(s)).map((s) => <button key={s} className="mr-2 underline" onClick={() => { setDirty(true); setSymbols(symbols.filter((x) => x !== s)); }}>{s} ×</button>)}</p>}
           </section>
           <section className="rounded-md border border-border bg-card p-4">
             <h2 className="mb-1 font-semibold">Timeframes per symbol</h2>
             <p className="mb-3 text-xs text-muted-foreground">Each symbol has its own timeframes — up to {MAX_TIMEFRAMES} each. Choose a symbol, then tick its timeframes.</p>
             <div className="mb-3 flex flex-wrap gap-1.5">
               {symbols.map((s) => (
-                <Button key={s} size="sm" variant={editing === s ? "default" : "outline"} className="font-mono text-xs" onClick={() => setEditing(s)}>{s} <span className="ml-1 opacity-70">{tfsOf(s).length}</span></Button>
+                <Button key={s} size="sm" variant={editing === s ? "default" : "outline"} className="font-mono text-xs" onClick={() => setEditing(s)}>{s} <span className="ml-1 opacity-70">{tfsPick(s).length}</span></Button>
               ))}
             </div>
             {symbols.includes(editing) ? (() => {
-              const cur = tfsOf(editing);
-              const set = (v: string[]) => setTfMap({ ...tfMap, [editing]: TIMEFRAMES.filter((x) => v.includes(x)) });
+              const cur = tfsPick(editing);
+              const set = (v: string[]) => { setDirty(true); setTfMap({ ...tfMap, [editing]: TIMEFRAMES.filter((x) => v.includes(x)) }); };
               return (<>
                 <div className="mb-2 flex items-center justify-between font-mono text-xs"><span>{editing}: {cur.length}/{MAX_TIMEFRAMES}</span>
-                  <button className="underline text-muted-foreground" onClick={() => { const n: Record<string, string[]> = { ...tfMap }; symbols.forEach((s) => (n[s] = cur)); setTfMap(n); }}>Copy to all symbols</button></div>
+                  <button className="underline text-muted-foreground" onClick={() => { const n: Record<string, string[]> = { ...tfMap }; symbols.forEach((s) => (n[s] = cur)); setTfMap(n); setDirty(true); }}>Copy to all symbols</button></div>
                 <div className="grid grid-cols-3 gap-2">
-                  {TIMEFRAMES.map((t) => (
+                  {TIMEFRAMES.filter((t) => settings.mock || timeframeCode(t)).map((t) => (
                     <label key={t} className="flex items-center gap-2 font-mono text-sm">
                       <Checkbox checked={cur.includes(t)} disabled={!cur.includes(t) && cur.length >= MAX_TIMEFRAMES} onCheckedChange={() => toggle(cur, set, t, MAX_TIMEFRAMES)} />{t}
                     </label>
