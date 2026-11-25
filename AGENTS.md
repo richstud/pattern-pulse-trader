@@ -31,3 +31,4 @@ use the editor.
 
 - Pattern rules live in src/lib/patterns.ts (pure, tested); the in-browser scanner and the VPS scanner.py template must stay in sync — same rules, two runtimes.
 - VPS backend lives in vps/ (Docker Compose: Postgres + FastAPI + Twisted cTrader engine); vps/app/patterns.py must mirror src/lib/patterns.ts. Netlify serves static files only and proxies /api/* to the VPS via netlify.toml — no Netlify Functions, to keep all compute on the VPS.
+- Dashboard VPS reads use the browser-only adapter in src/lib/vps-feed.ts; retain API keys in memory only, require HTTPS from HTTPS pages, and derive watchlists and order states from the VPS without inventing candles or fills because the current API exposes no candle stream.
