@@ -1,4 +1,5 @@
-"""cTrader Open API engine: auth -> load symbols -> poll closed bars -> detect -> (optional) LIMIT order.
+"""cTrader Open API engine: auth -> load symbols -> seed history once -> build every timeframe from
+live ticks -> detect on bar close -> (optional) LIMIT order. No trendbar polling while running.
 Runs under Twisted. Signals and status are written to Postgres for the API/dashboard."""
 import os, time, math, logging, yaml
 from twisted.internet import reactor, task
@@ -33,7 +34,11 @@ AUTO = os.environ.get("AUTO_EXECUTE", "false").lower() == "true"
 NATIVE = {"M1": 1, "M2": 2, "M3": 3, "M4": 4, "M5": 5, "M10": 10, "M15": 15, "M30": 30,
           "H1": 60, "H4": 240, "H12": 720, "D1": 1440, "W1": 10080}
 CUSTOM = {"M45": 45, "M75": 75, "M125": 125, "H2": 120}  # built from M1 bars
-SECONDS = {"S1": 1, "S5": 5, "S10": 10, "S15": 15, "S30": 30, "S45": 45}  # built live from ticks
+SECONDS = {"S1": 1, "S5": 5, "S10": 10, "S15": 15, "S30": 30, "S45": 45}
+# Every timeframe (seconds and minutes) is built live from ticks; length in seconds.
+TF_SECS = {**SECONDS, **{k: v * 60 for k, v in NATIVE.items()}, **{k: v * 60 for k, v in CUSTOM.items()}}
+SEED_BASE = {"M45": "M15", "M75": "M15", "M125": "M5", "H2": "H1"}  # native period used to seed custom TFs
+SEED_BARS = 40     # closed bars downloaded once per minute timeframe at startup
 tick_bars = {}     # (sym, tf) -> list of closed bars (in memory, newest last)
 cur_bar = {}       # (sym, tf) -> bar being built
 last_px = {}       # sym -> last bid
@@ -42,10 +47,11 @@ MAX_TICK_BARS = 200
 
 client = Client(HOST, EndPoints.PROTOBUF_PORT, TcpProtocol)
 symbols = {}       # name -> {id, digits, lotSize}
-last_bar = {}      # (sym, tf) -> last processed bar ts
 ready = False
-bar_queue = []     # pending (sym, tf, req, mins, closed, native) trendbar requests
-PACE = 0.35        # seconds between trendbar requests (cTrader allows ~5/s for history)
+seed_queue = []    # startup history requests (sym, tf, req, mins, start), sent one at a time
+PACE = 1.2         # seconds between seed requests (~50/min, under cTrader's history quota)
+COOLDOWN = 6.0     # pause after a rate-limit reply before retrying
+busy_until = 0.0   # no seed request is sent before this time (in-flight or cooling down)
 
 # Broker names differ (e.g. Pepperstone uses NAS100 for US100). Tried in order.
 ALIASES = {
@@ -158,17 +164,16 @@ def got_details(m, found):
     ready = True
     by_symbol_id.clear()
     by_symbol_id.update({v["id"]: k for k, v in symbols.items()})
-    if any(tf in SECONDS for sym in symbols for tf in CFG["watchlist"].get(sym, [])):
-        r = ProtoOASubscribeSpotsReq(ctidTraderAccountId=ACC, symbolId=[v["id"] for v in symbols.values()])
-        send(r).addCallback(lambda x: (check(x), log.info("live ticks subscribed: %s", ", ".join(symbols))))
+    r = ProtoOASubscribeSpotsReq(ctidTraderAccountId=ACC, symbolId=[v["id"] for v in symbols.values()])
+    send(r).addCallback(lambda x: (check(x), log.info("live ticks subscribed: %s", ", ".join(symbols))))
+    queue_seeds()
     beat(True, f"{len(symbols)} symbols, auto_execute={AUTO}")
     log.info("ready: %s", ", ".join(symbols))
 
 def on_disconnected(_, reason):
     global ready
     ready = False
-    bar_queue.clear()
-    last_bar.clear()
+    seed_queue.clear()
     cur_bar.clear()
     beat(False, f"disconnected: {reason}")
     log.warning("disconnected: %s - reconnecting in 5s", reason)
@@ -195,59 +200,72 @@ def aggregate(bars, minutes):
             g["c"], g["v"] = b["c"], g["v"] + b["v"]
     return [groups[k] for k in sorted(groups)]
 
-def poll():
-    if not ready:
-        return
+def queue_seeds():
+    """Queue one history download per minute timeframe so ATR works immediately after a restart."""
+    seed_queue.clear()
     now = int(time.time() * 1000)
     for sym, tfs in CFG["watchlist"].items():
         if sym not in symbols:
             continue
         for tf in tfs:
-            mins = NATIVE.get(tf) or CUSTOM.get(tf)
-            if not mins:
-                continue  # second periods are built from live ticks
-            closed = now // (mins * 60000) * mins * 60000  # start of the current (open) bar
-            if last_bar.get((sym, tf)) == closed:
+            secs = TF_SECS.get(tf)
+            if not secs or tf in SECONDS or len(tick_bars.get((sym, tf), [])) >= SEED_BARS:
                 continue
-            last_bar[(sym, tf)] = closed
-            base_tf = tf if tf in NATIVE else "M1"
-            base_min = NATIVE[base_tf]
+            mins = secs // 60
+            base = tf if tf in NATIVE else SEED_BASE.get(tf, "M1")
+            start = now // (secs * 1000) * secs * 1000  # start of the open bar
             req = ProtoOAGetTrendbarsReq(ctidTraderAccountId=ACC, symbolId=symbols[sym]["id"],
-                period=ProtoOATrendbarPeriod.Value(base_tf),
-                fromTimestamp=closed - mins * 60000 * 80, toTimestamp=closed)
-            bar_queue.append((sym, tf, req, mins, closed, tf in NATIVE))
+                period=ProtoOATrendbarPeriod.Value(base),
+                fromTimestamp=start - secs * 1000 * SEED_BARS, toTimestamp=start)
+            seed_queue.append((sym, tf, req, mins, start, base == tf))
+    log.info("seeding history for %d feeds (one-time, ~%ds)", len(seed_queue), int(len(seed_queue) * PACE))
 
 def drain():
-    """Send one queued trendbar request; on rate limit, retry it later."""
-    if not ready or not bar_queue:
+    """Send one seed request at a time; on rate limit, cool down and retry the same item."""
+    global busy_until
+    if not ready or not seed_queue or time.time() < busy_until:
         return
-    sym, tf, req, mins, closed, native = item = bar_queue.pop(0)
+    item = seed_queue.pop(0)
+    sym, tf, req, mins, start, native = item
+    busy_until = time.time() + 30  # held until the reply arrives
     def ok(m):
+        global busy_until
         try:
             res = check(m)
         except RuntimeError as e:
             if "BLOCKED_PAYLOAD_TYPE" in str(e) or "rate" in str(e).lower():
-                log.warning("rate limited on %s %s - retrying", sym, tf)
-                bar_queue.append(item)
+                log.warning("history throttled on %s %s - pausing %.0fs", sym, tf, COOLDOWN)
+                seed_queue.insert(0, item)
+                busy_until = time.time() + COOLDOWN
             else:
-                log.error("trendbars %s %s: %s", sym, tf, e)
+                log.error("history %s %s: %s", sym, tf, e)
+                busy_until = time.time() + PACE
             return
-        try:
-            scan(sym, tf, res, mins, closed, native)
-        except Exception as e:
-            log.exception("scan %s %s failed: %s", sym, tf, e)
-    send(req).addCallback(ok)
+        busy_until = time.time() + PACE
+        bars = to_bars(res)
+        if not native:
+            bars = aggregate(bars, mins)
+        seed(sym, tf, [b for b in bars if b["t"] < start])
+        if not seed_queue:
+            log.info("history seeded - running 100%% on live ticks")
+    def fail(f):
+        global busy_until
+        seed_queue.insert(0, item)
+        busy_until = time.time() + COOLDOWN
+    send(req).addCallbacks(ok, fail)
 
-def scan(sym, tf, m, mins, closed, native):
-    bars = to_bars(m)
-    if not native:
-        bars = aggregate(bars, mins)
-    scan_bars(sym, tf, [b for b in bars if b["t"] < closed])  # closed bars only
+def seed(sym, tf, bars):
+    """Put downloaded history before any bars already built from ticks. No scan: old setups are stale."""
+    key = (sym, tf)
+    live = tick_bars.get(key, [])
+    first = live[0]["t"] if live else float("inf")
+    merged = [b for b in bars if b["t"] < first] + live
+    tick_bars[key] = merged[-MAX_TICK_BARS:]
 
 def on_tick(sym, price, ts_ms):
-    """Feed one tick into every second-timeframe bar for this symbol."""
+    """Feed one tick into every timeframe bar for this symbol."""
     for tf in CFG["watchlist"].get(sym, []):
-        secs = SECONDS.get(tf)
+        secs = TF_SECS.get(tf)
         if not secs:
             continue
         key = (sym, tf)
@@ -260,13 +278,15 @@ def on_tick(sym, price, ts_ms):
             cur_bar[key] = {"t": start, "o": price, "h": price, "l": price, "c": price, "v": 1}
         else:
             b["h"], b["l"], b["c"] = max(b["h"], price), min(b["l"], price), price
-            b["v"] += 1  # tick count used as volume
+            b["v"] += 1  # tick count used as volume (cTrader trendbar volume is also tick volume)
 
 def close_bar(key):
     b = cur_bar.pop(key, None)
     if not b:
         return
     lst = tick_bars.setdefault(key, [])
+    if lst and lst[-1]["t"] >= b["t"]:
+        return
     lst.append(b)
     del lst[:-MAX_TICK_BARS]
     try:
@@ -275,10 +295,10 @@ def close_bar(key):
         log.exception("scan %s %s failed: %s", key[0], key[1], e)
 
 def flush_bars():
-    """Close second bars whose time has passed even if no new tick arrived."""
+    """Close bars whose time has passed even if no new tick arrived."""
     now = int(time.time() * 1000)
     for key, b in list(cur_bar.items()):
-        if now >= b["t"] + SECONDS[key[1]] * 1000:
+        if now >= b["t"] + TF_SECS[key[1]] * 1000:
             close_bar(key)
 
 def on_message(_, msg):
@@ -291,7 +311,8 @@ def on_message(_, msg):
     if m.HasField("bid"):
         last_px[sym] = m.bid / 100000
     if sym in last_px:
-        on_tick(sym, last_px[sym], int(time.time() * 1000))
+        ts = m.timestamp if m.HasField("timestamp") and m.timestamp else int(time.time() * 1000)
+        on_tick(sym, last_px[sym], ts)
 
 def scan_bars(sym, tf, bars):
     if len(bars) < CFG["atr_period"] + 5:
@@ -344,8 +365,7 @@ if __name__ == "__main__":
     client.setDisconnectedCallback(on_disconnected)
     client.setMessageReceivedCallback(on_message)
     client.startService()
-    task.LoopingCall(poll).start(5.0)
-    task.LoopingCall(drain).start(PACE)
+    task.LoopingCall(drain).start(0.2)
     task.LoopingCall(flush_bars).start(0.5)
     task.LoopingCall(watch_config).start(3.0)
     task.LoopingCall(lambda: ready and beat(True, f"{len(symbols)} symbols, auto_execute={AUTO}")).start(30.0)
