@@ -11,6 +11,7 @@ import { scanLatest, gradeBody, type Candle, type Signal } from "@/lib/patterns"
 import { SYMBOLS, SYMBOL_GROUPS, TIMEFRAMES, MAX_SYMBOLS, MAX_TIMEFRAMES, seedCandles, advance, digits } from "@/lib/mock-feed";
 import { readVps, saveWatchlist, timeframeCode, heartbeatFresh, timeframeLabel, type Heartbeat, type DisplaySignal } from "@/lib/vps-feed";
 import { deployFiles } from "@/lib/deploy-files";
+import { CONNECTION_STORAGE_KEY, restoreConnection, rememberConnection, connectionIssue, scannerState, reportFailure, startVpsPolling } from "@/lib/vps-connection";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -40,11 +41,13 @@ function Dashboard() {
   const [apiKey, setApiKey] = useState("");
   const [activeConnection, setActiveConnection] = useState<{ url: string; key: string } | null>(null);
   const [heartbeat, setHeartbeat] = useState<Heartbeat | null>(null);
+  const latestHeartbeat = useRef<Heartbeat | null>(null);
   const [serverWatchlist, setServerWatchlist] = useState<Record<string, string[]>>({});
   const [connectionError, setConnectionError] = useState("");
   const [lastRead, setLastRead] = useState<number | null>(null);
   const [refresh, setRefresh] = useState(0);
-  const requestGeneration = useRef(0);
+  const [clock, setClock] = useState(0);
+  const [storageNotice, setStorageNotice] = useState("");
   const [dirty, setDirty] = useState(false);
   const [saveMsg, setSaveMsg] = useState("");
   const [saving, setSaving] = useState(false);
@@ -77,9 +80,15 @@ function Dashboard() {
 
   useEffect(() => {
     // Discard legacy browser-stored broker credentials. VPS owns broker authentication.
-    localStorage.removeItem("lbl-settings");
-    const savedUrl = localStorage.getItem("lbl-vps-url");
-    if (savedUrl) setApiUrl(savedUrl);
+    try {
+      localStorage.removeItem("lbl-settings");
+      const saved = restoreConnection(localStorage);
+      const savedUrl = localStorage.getItem("lbl-vps-url");
+      if (saved) {
+        setApiUrl(saved.url); setApiKey(saved.key);
+        setActiveConnection(saved); setConn("connecting");
+      } else if (savedUrl) setApiUrl(savedUrl);
+    } catch { setStorageNotice("This browser cannot remember your connection. Keep this page open or allow site storage."); }
   }, []);
   useEffect(() => {
     setSeries({}); setSignals([]); seen.current.clear();
@@ -87,32 +96,38 @@ function Dashboard() {
 
   useEffect(() => {
     if (settings.mock || !activeConnection) return;
-    const generation = ++requestGeneration.current;
-    const controller = new AbortController();
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let disposed = false;
-    async function poll() {
-      if (!activeConnection) return;
-      const timeout = setTimeout(() => controller.abort(), 12_000);
-      try {
-        const result = await readVps(activeConnection.url, activeConnection.key, controller.signal);
-        if (disposed || requestGeneration.current !== generation) return;
-        setHeartbeat(result.heartbeat); setServerWatchlist(result.watchlist); setSignals(result.signals);
-        setLastRead(Date.now()); setConnectionError("");
+    let failures = 0;
+    let remembered = false;
+    return startVpsPolling({
+      read: signal => readVps(activeConnection.url, activeConnection.key, signal),
+      onResult: result => {
+        latestHeartbeat.current = result.heartbeat; failures = 0;
+        setHeartbeat(result.heartbeat); setServerWatchlist(result.watchlist);
+        if (running) setSignals(result.signals);
+        setLastRead(Date.now()); setClock(Date.now()); setConnectionError("");
         setConn(heartbeatFresh(result.heartbeat) ? "connected" : "error");
-        if (!heartbeatFresh(result.heartbeat)) setConnectionError("VPS API reached, but the engine is disconnected or its heartbeat is stale.");
-      } catch (error) {
-        if (disposed) return;
-        setConn("error");
-        setConnectionError(error instanceof Error && error.name !== "ZodError" ? error.message : "Unexpected VPS response; check the API address and version.");
-      } finally {
-        clearTimeout(timeout);
-        if (!disposed && running && !controller.signal.aborted) timer = setTimeout(poll, 5000);
-      }
-    }
-    void poll();
-    return () => { disposed = true; controller.abort(); clearTimeout(timer); };
+        if (!heartbeatFresh(result.heartbeat)) setConnectionError(result.heartbeat.connected
+          ? "VPS engine heartbeat is stale. Scanning cannot be confirmed. Rechecking automatically…"
+          : "VPS engine is disconnected from cTrader. Scanning cannot be confirmed. Rechecking automatically…");
+        if (!remembered) {
+          try { rememberConnection(localStorage, activeConnection); setStorageNotice(""); remembered = true; }
+          catch { setStorageNotice("Connection works, but this browser cannot save the key for your next visit."); }
+        }
+      },
+      onError: (error, aborted) => {
+        failures += 1;
+        if (reportFailure(latestHeartbeat.current, failures) || !aborted && !(error instanceof TypeError)) {
+          setConn("error"); setConnectionError(connectionIssue(error, aborted));
+        }
+      },
+    });
   }, [activeConnection, settings.mock, running, refresh]);
+
+  useEffect(() => {
+    if (settings.mock || !activeConnection) return;
+    const timer = setInterval(() => setClock(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [settings.mock, activeConnection]);
 
   useEffect(() => {
     if (!running || !settings.mock) return;
@@ -149,14 +164,18 @@ function Dashboard() {
     set(list.includes(v) ? list.filter((x) => x !== v) : list.length >= max ? list : [...list, v]);
 
   const testConnection = () => {
+    latestHeartbeat.current = null;
     setSettings(v => ({ ...v, mock: false }));
     setSeries({}); setSignals([]); setServerWatchlist({}); setHeartbeat(null); setLastRead(null);
     setConn("connecting"); setConnectionError("");
-    localStorage.setItem("lbl-vps-url", apiUrl);
+
     setActiveConnection({ url: apiUrl, key: apiKey });
   };
-  const status = settings.mock ? "SIMULATED FEED" : conn === "connected" && heartbeat && heartbeatFresh(heartbeat) ? `VPS ${heartbeat.env?.toUpperCase() ?? "UNKNOWN"} · ${running ? "CONNECTED" : "PAUSED"}` : conn.toUpperCase();
-  const statusColor = settings.mock ? "bg-muted-foreground" : conn === "connected" ? "bg-bull" : conn === "error" ? "bg-bear" : "bg-muted-foreground";
+  const liveHealthy = conn === "connected" && heartbeat !== null && heartbeatFresh(heartbeat, clock || Date.now());
+  const healthError = connectionError || (activeConnection && heartbeat && !heartbeatFresh(heartbeat, clock || Date.now())
+    ? "VPS engine is disconnected or its heartbeat is stale. Scanning cannot be confirmed. Rechecking automatically…" : "");
+  const status = settings.mock ? "SIMULATED FEED" : liveHealthy ? `VPS ${heartbeat?.env?.toUpperCase() ?? "UNKNOWN"} · ${running ? "CONNECTED" : "PAUSED"}` : healthError ? "OFFLINE" : conn.toUpperCase();
+  const statusColor = settings.mock ? "bg-muted-foreground" : liveHealthy ? "bg-bull" : healthError ? "bg-bear" : "bg-muted-foreground";
 
   return (
     <div className="min-h-screen bg-background font-sans text-foreground">
@@ -165,7 +184,7 @@ function Dashboard() {
           <h1 className="text-xl font-bold tracking-tight"><span className="text-primary">LBL</span> Scanner</h1>
           <p className="text-xs text-muted-foreground">Legin · Boring · Legout — Pepperstone cTrader</p>
         </div>
-        <div className="flex items-center gap-4 font-mono text-xs">
+        <div className="flex flex-wrap items-center gap-4 font-mono text-xs">
           <span className="flex items-center gap-2"><span className={`h-2 w-2 rounded-full ${statusColor} ${running ? "animate-pulse" : ""}`} />{status}</span>
           <span className="text-muted-foreground">{displaySymbols.length}/{MAX_SYMBOLS} SYM · {pairs.length} FEEDS · {signals.length} SIG</span>
           <Button size="sm" variant={running ? "secondary" : "default"} onClick={() => setRunning(!running)}>{running ? "Pause display" : "Resume display"}</Button>
@@ -181,9 +200,10 @@ function Dashboard() {
           <TabsTrigger value="deploy">VPS Export</TabsTrigger>
         </TabsList>
 
+        {!settings.mock && healthError && <div role="alert" className="mt-4 rounded-md border border-bear/40 bg-bear/10 p-3 text-sm text-bear">{healthError}</div>}
+
         <TabsContent value="scanner" className="mt-4 space-y-6">
           {!settings.mock && <div className="space-y-2 text-sm">
-            {connectionError && <p role="alert" className="text-bear">{connectionError}</p>}
             {!activeConnection && <p className="text-muted-foreground">VPS not connected. Enter your API address and key in VPS Connection.</p>}
             {heartbeat && <p className="font-mono text-xs text-muted-foreground">Account {heartbeat.account_id ?? "—"} · {heartbeat.env ?? "unknown"} · {heartbeat.detail} · Last read {lastRead ? new Date(lastRead).toLocaleTimeString() : "—"}</p>}
             {activeConnection && <p className="text-xs text-muted-foreground">VPS signals and order responses only; live prices and candle charts are not supplied by this API. Pausing this display does not stop VPS trading.</p>}
@@ -199,7 +219,7 @@ function Dashboard() {
                 {displaySymbols.map((s) => (
                   <tr key={s} className="border-t border-border">
                     <td className="sticky left-0 bg-background px-3 py-2 font-semibold">{s}<div className="text-[10px] font-normal text-muted-foreground">{series[`${s}|${tfsOf(s)[0]}`]?.at(-1)?.c.toFixed(digits(s)) ?? "—"}</div></td>
-                    {allTfs.map((tf) => tfsOf(s).includes(tf) ? <Cell key={tf} candles={series[`${s}|${tf}`]} sig={latestByCell[`${s}|${tf}`]} /> : <td key={tf} className="px-2 py-2 text-center text-muted-foreground/40">·</td>)}
+                    {allTfs.map((tf) => tfsOf(s).includes(tf) ? <Cell key={tf} live={!settings.mock} healthy={liveHealthy} running={running} candles={series[`${s}|${tf}`]} sig={latestByCell[`${s}|${tf}`]} /> : <td key={tf} className="px-2 py-2 text-center text-muted-foreground/40">·</td>)}
                   </tr>
                 ))}
               </tbody>
@@ -211,7 +231,7 @@ function Dashboard() {
         <TabsContent value="signals" className="mt-4"><SignalTable signals={signals} /></TabsContent>
 
         <TabsContent value="setup" className="mt-4 grid gap-6 md:grid-cols-2">
-          {!settings.mock && <div className="md:col-span-2 rounded-md border border-border bg-card p-4"><div className="mb-2 flex flex-wrap items-center justify-between gap-3"><h2 className="font-semibold">VPS is scanning · {pairs.length} feeds</h2><Button onClick={applyToVps} disabled={saving || !activeConnection}>{saving ? "Saving…" : "Save & apply to VPS"}</Button></div>
+          {!settings.mock && <div className="md:col-span-2 rounded-md border border-border bg-card p-4"><div className="mb-2 flex flex-wrap items-center justify-between gap-3"><h2 className="font-semibold">{liveHealthy ? "VPS is scanning" : "VPS scanning not confirmed"} · {pairs.length} feeds</h2><Button onClick={applyToVps} disabled={saving || !activeConnection}>{saving ? "Saving…" : "Save & apply to VPS"}</Button></div>
             <p className="mb-3 text-xs text-muted-foreground">{dirty ? "You have unsaved changes below." : "Pick tickers and timeframes below, then press Save & apply."} Second timeframes start empty and need a few minutes of live ticks.</p>
             {saveMsg && <p role="status" className="mb-2 text-sm">{saveMsg}</p>}
             {Object.entries(serverWatchlist).map(([symbol, frames]) => <p key={symbol} className="mb-2 break-words font-mono text-xs"><strong>{symbol}</strong> · {frames.length} timeframes · {frames.map(timeframeLabel).join(", ")}</p>)}
@@ -285,9 +305,9 @@ function Dashboard() {
           <div className="space-y-1"><Label htmlFor="vps-url">VPS API address</Label><Input id="vps-url" value={apiUrl} onChange={e => setApiUrl(e.target.value.trim())} placeholder="/api or https://api.example.com" className="font-mono" /></div>
           <p className="text-xs text-muted-foreground">Use /api on your Netlify site. This HTTPS preview needs an HTTPS VPS address; http://103.77.155.79:8000 is blocked by browser security. Netlify's current proxy uses HTTP to the VPS, so that server-side connection is not encrypted.</p>
           <div className="space-y-1"><Label htmlFor="vps-key">VPS API key</Label><Input id="vps-key" type="password" autoComplete="off" value={apiKey} onChange={e => setApiKey(e.target.value)} className="font-mono" /></div>
-          <p className="text-xs text-muted-foreground">Key stays in memory and clears on reload. Broker credentials stay on your VPS. Rotate the API key previously shared in screenshots.</p>
-          <div className="flex flex-wrap items-center gap-3"><Button onClick={testConnection} disabled={conn === "connecting"}>Connect VPS</Button><Button variant="outline" onClick={() => { setActiveConnection(null); setApiKey(""); setHeartbeat(null); setServerWatchlist({}); setSeries({}); setSignals([]); setLastRead(null); setConn("disconnected"); setConnectionError(""); }}>Disconnect</Button><span className="font-mono text-xs">{conn}</span></div>
-          {connectionError && <p role="alert" className="text-sm text-bear">{connectionError}</p>}
+          <p className="text-xs text-muted-foreground">Key is remembered on this browser and is not encrypted on this device. Disconnect forgets it. Broker credentials stay on your VPS. Rotate any key shared in screenshots.</p>
+          <div className="flex flex-wrap items-center gap-3"><Button onClick={testConnection} disabled={conn === "connecting"}>Connect VPS</Button><Button variant="outline" onClick={() => { try { localStorage.removeItem(CONNECTION_STORAGE_KEY); localStorage.removeItem("lbl-vps-url"); setStorageNotice(""); } catch { setStorageNotice("Unable to forget the saved key. Clear this site's browser storage."); } setActiveConnection(null); setApiKey(""); setHeartbeat(null); setServerWatchlist({}); setSeries({}); setSignals([]); setLastRead(null); setConn("disconnected"); setConnectionError(""); }}>Disconnect</Button><span className="font-mono text-xs">{conn}</span></div>
+          {storageNotice && <p role="status" className="text-sm text-muted-foreground">{storageNotice}</p>}
           <p className="text-xs text-muted-foreground">Connection is read-only. Trading is controlled by AUTO_EXECUTE on the VPS; “SENT” is a server response, not proof of a fill. Confirm orders in cTrader.</p>
           {settings.mock && <>
             <div className="flex items-center justify-between"><Label htmlFor="simulation-orders">Simulate order placement</Label><Switch id="simulation-orders" checked={settings.autoExecute} onCheckedChange={v => setSettings({ ...settings, autoExecute: v })} /></div>
@@ -301,15 +321,18 @@ function Dashboard() {
   );
 }
 
-function Cell({ candles, sig }: { candles?: Candle[] | undefined; sig?: DisplaySignal | undefined }) {
-  const fresh = sig && Date.now() - sig.time < 15000;
+function Cell({ candles, sig, live, healthy, running }: { candles?: Candle[] | undefined; sig?: DisplaySignal | undefined; live: boolean; healthy: boolean; running: boolean }) {
+  const state = live ? scannerState(healthy, running, sig?.type) : scannerState(true, running, sig?.type);
+  const fresh = (!live || healthy) && sig && Date.now() - sig.time < 15000;
   const pts = candles?.slice(-30) ?? [];
   const lo = Math.min(...pts.map((c) => c.l)), hi = Math.max(...pts.map((c) => c.h));
   const path = pts.map((c, i) => `${(i / 29) * 100},${30 - ((c.c - lo) / (hi - lo || 1)) * 28 - 1}`).join(" ");
   return (
     <td className={`border-l border-border px-1 py-1 text-center ${fresh ? (sig?.side === "BUY" ? "bg-bull/15" : "bg-bear/15") : ""}`}>
-      <svg viewBox="0 0 100 30" className="h-6 w-full min-w-16" preserveAspectRatio="none"><polyline points={path} fill="none" stroke="currentColor" strokeWidth="1.2" className="text-muted-foreground" vectorEffect="non-scaling-stroke" /></svg>
-      <div className={`text-[10px] ${sig ? (sig.side === "BUY" ? "text-bull" : "text-bear") : "text-muted-foreground"}`}>{sig ? sig.type : candles ? "scanning" : "—"}</div>
+      {!live && <svg viewBox="0 0 100 30" className="h-6 w-full min-w-16" preserveAspectRatio="none"><polyline points={path} fill="none" stroke="currentColor" strokeWidth="1.2" className="text-muted-foreground" vectorEffect="non-scaling-stroke" /></svg>}
+      <div className={`flex min-h-10 min-w-24 items-center justify-center gap-1 whitespace-nowrap text-[10px] ${state === "OFFLINE" ? "text-bear" : state === "PAUSED" ? "text-muted-foreground" : sig?.side === "SELL" ? "text-bear" : "text-bull"}`}>
+        {state === "SCANNING" && <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-bull motion-safe:animate-pulse" />}{state}
+      </div>
     </td>
   );
 }
