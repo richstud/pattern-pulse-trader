@@ -1,4 +1,4 @@
-export const deployFiles = (cfg: { symbols: string[]; timeframes: Record<string, string[]>; rr: number; accountId: string }) => ({
+export const deployFiles = (cfg: { symbols: string[]; timeframes: Record<string, string[]>; rr: number; accountId: string; atrPeriod?: number }) => ({
   Dockerfile: `FROM python:3.12-slim
 WORKDIR /app
 RUN pip install --no-cache-dir ctrader-open-api twisted pyyaml
@@ -18,10 +18,10 @@ CTRADER_HOST=demo.ctraderapi.com   # live.ctraderapi.com for live`,
   "config.yaml": `# each symbol has its own timeframes
 watchlist:
 ${cfg.symbols.map((s) => `  ${s}: [${(cfg.timeframes[s] ?? []).map((t) => `"${t}"`).join(", ")}]`).join("\n")}
-atr_period: 14
+atr_period: ${cfg.atrPeriod ?? 14}
 min_body_ratio: 0.60      # body:wick 60:40 minimum
 size_multiple: 2.0        # legin >= 2x boring, legout >= 2x legin
-max_legout_offset: 3      # legout 1, 2 or 3
+max_legout_offset: 3      # base of 1-3 boring candles, legout right after
 reward_risk: ${cfg.rr}
 volume_lots: 0.10
 auto_execute: false`,

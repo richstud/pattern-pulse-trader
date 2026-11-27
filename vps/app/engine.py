@@ -38,7 +38,7 @@ SECONDS = {"S1": 1, "S5": 5, "S10": 10, "S15": 15, "S30": 30, "S45": 45}
 # Every timeframe (seconds and minutes) is built live from ticks; length in seconds.
 TF_SECS = {**SECONDS, **{k: v * 60 for k, v in NATIVE.items()}, **{k: v * 60 for k, v in CUSTOM.items()}}
 SEED_BASE = {"M45": "M15", "M75": "M15", "M125": "M5", "H2": "H1"}  # native period used to seed custom TFs
-SEED_BARS = 40     # closed bars downloaded once per minute timeframe at startup
+SEED_BARS = max(40, int(CFG.get("atr_period", 14)) + 20)  # closed bars seeded once per minute timeframe (enough for ATR)
 tick_bars = {}     # (sym, tf) -> list of closed bars (in memory, newest last)
 cur_bar = {}       # (sym, tf) -> bar being built
 last_px = {}       # sym -> last bid
@@ -318,10 +318,11 @@ def scan_bars(sym, tf, bars):
     if len(bars) < CFG["atr_period"] + 5:
         return
     # newest completed setup: Legout is the last closed bar, offset 1..3
-    for k in range(1, CFG["max_legout_offset"] + 1):
-        i = len(bars) - 2 - k
+    # newest completed setup: legout must be the last closed bar (base 1..3, offset 1..3)
+    last = len(bars) - 1
+    for i in range(last - 2, max(0, last - 2 - 3 - CFG["max_legout_offset"]), -1):
         sig = detect(bars, i, CFG)
-        if sig and sig["legout_offset"] == k:
+        if sig and sig["end_index"] == last:
             save(sym, tf, sig)
             break
 

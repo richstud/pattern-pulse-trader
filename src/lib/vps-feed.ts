@@ -5,7 +5,7 @@ const heartbeatSchema = z.object({
   connected: z.boolean(), updated_at: z.string().optional(), env: z.enum(["demo", "live"]).optional(),
   account_id: z.union([z.string(), z.number()]).optional(), detail: z.string(),
 });
-const configSchema = z.object({ watchlist: z.record(z.array(z.string())), reward_risk: z.number().optional() });
+const configSchema = z.object({ watchlist: z.record(z.array(z.string())), reward_risk: z.number().optional(), atr_period: z.number().optional() });
 const signalSchema = z.object({
   id: z.number(), created_at: z.string(), symbol: z.string(), timeframe: z.string(),
   code: z.enum(["RBR", "DBR", "DBD", "RBD"]), side: z.enum(["BUY", "SELL"]),
@@ -47,14 +47,16 @@ export async function readVps(base: string, key: string, signal: AbortSignal) {
   }
   const [status, config, rows] = await Promise.all([read("status"), read("config"), read("signals?limit=100")]);
   const heartbeat = heartbeatSchema.parse(status);
-  const watchlist = configSchema.parse(config).watchlist;
+  const parsedConfig = configSchema.parse(config);
+  const watchlist = parsedConfig.watchlist;
+  const atrPeriod = parsedConfig.atr_period ?? 14;
   const signals: DisplaySignal[] = z.array(signalSchema).parse(rows).map(row => ({
     id: `vps-${row.id}`, symbol: row.symbol, tf: timeframeLabel(row.timeframe), type: row.code, side: row.side,
     boringHigh: row.boring_high, boringLow: row.boring_low, limit: row.limit_price, sl: row.sl, tp: row.tp,
     rr: Math.abs(row.limit_price - row.sl) ? Number((Math.abs(row.tp - row.limit_price) / Math.abs(row.limit_price - row.sl)).toFixed(2)) : 0,
     time: Date.parse(row.created_at), status: row.status.toUpperCase(), note: row.note ?? "",
   }));
-  return { heartbeat, watchlist, signals };
+  return { heartbeat, watchlist, signals, atrPeriod };
 }
 const SUPPORTED = new Set(["S1","S5","S10","S15","S30","S45","M1","M2","M3","M4","M5","M10","M15","M30","M45","M75","M125","H1","H2","H4","H12","D1","W1"]);
 /** "15 SEC" -> "S15", "1 HR" -> "H1"; null when the VPS engine cannot scan that timeframe. */
@@ -84,4 +86,15 @@ export async function saveWatchlist(base: string, key: string, watchlist: Record
     throw new Error(detail?.detail ?? `Save failed (${response.status}).`);
   }
   return body;
+}
+
+export async function saveAtrPeriod(base: string, key: string, atrPeriod: number) {
+  const root = apiBase(base, window.location.origin);
+  const response = await fetch(root + "config/atr", {
+    method: "PUT", headers: { "X-API-Key": key.trim(), "Content-Type": "application/json" },
+    body: JSON.stringify({ atr_period: atrPeriod }), credentials: "omit", redirect: "error",
+  });
+  if (response.status === 401) throw new Error("API key rejected.");
+  if (response.status === 404 || response.status === 405) throw new Error("Your VPS is on an older version. Run git pull and docker compose up -d --build api on the VPS.");
+  if (!response.ok) throw new Error(`Save failed (${response.status}).`);
 }

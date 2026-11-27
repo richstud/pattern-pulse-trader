@@ -61,3 +61,15 @@ def save_watchlist(watchlist: dict = Body(..., embed=True)):
     with open("config.yaml", "w") as f:  # write in place: keeps the shared bind-mounted file
         yaml.safe_dump(cfg, f, sort_keys=False, default_flow_style=None)
     return {"ok": True, "watchlist": clean}
+
+
+@app.put("/config/atr", dependencies=[Depends(auth)])
+def save_atr(atr_period: int = Body(..., embed=True)):
+    """Switch ATR period (14 or 100). The engine restarts itself to apply it."""
+    if atr_period not in (14, 100):
+        raise HTTPException(400, "ATR period must be 14 or 100")
+    cfg = yaml.safe_load(open("config.yaml"))
+    cfg["atr_period"] = atr_period
+    with open("config.yaml", "w") as f:
+        yaml.safe_dump(cfg, f, sort_keys=False, default_flow_style=None)
+    return {"ok": True, "atr_period": atr_period}

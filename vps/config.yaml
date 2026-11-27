@@ -6,7 +6,7 @@ watchlist:
   XAUUSD: [S15, S30, S45, M1, M3, M5, M15]
   US100:  [M1, M5, M15, H1]
   EURUSD: [M5, M15, H1]
-atr_period: 14
+atr_period: 14          # 14 or 100 (switch from the dashboard Rules tab)
 min_body_ratio: 0.60
 size_multiple: 2.0
 max_legout_offset: 3

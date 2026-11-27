@@ -1,3 +1,4 @@
+import { toast } from "sonner";
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -9,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { scanLatest, gradeBody, type Candle, type Signal } from "@/lib/patterns";
 import { SYMBOLS, SYMBOL_GROUPS, TIMEFRAMES, MAX_SYMBOLS, MAX_TIMEFRAMES, seedCandles, advance, digits } from "@/lib/mock-feed";
-import { readVps, saveWatchlist, timeframeCode, heartbeatFresh, timeframeLabel, type Heartbeat, type DisplaySignal } from "@/lib/vps-feed";
+import { readVps, saveWatchlist, saveAtrPeriod, timeframeCode, heartbeatFresh, timeframeLabel, type Heartbeat, type DisplaySignal } from "@/lib/vps-feed";
 import { deployFiles } from "@/lib/deploy-files";
 import { CONNECTION_STORAGE_KEY, restoreConnection, rememberConnection, connectionIssue, scannerState, reportFailure, startVpsPolling } from "@/lib/vps-connection";
 
@@ -27,9 +28,9 @@ export const Route = createFileRoute("/")({
   component: Dashboard,
 });
 
-type Settings = { accountId: string; mock: boolean; autoExecute: boolean; rr: number };
+type Settings = { accountId: string; mock: boolean; autoExecute: boolean; rr: number; atrPeriod: number };
 const DEFAULT_TFS = ["15 SEC", "30 SEC", "1 MIN", "5 MIN", "15 MIN", "1 HR"];
-const DEFAULT_SETTINGS: Settings = { accountId: "", mock: false, autoExecute: true, rr: 2 };
+const DEFAULT_SETTINGS: Settings = { accountId: "", mock: false, autoExecute: true, rr: 2, atrPeriod: 14 };
 
 function Dashboard() {
   const [symbols, setSymbols] = useState<string[]>(["US100", "EURUSD", "GBPUSD", "XAUUSD", "US500", "BTCUSD"]);
@@ -102,7 +103,7 @@ function Dashboard() {
       read: signal => readVps(activeConnection.url, activeConnection.key, signal),
       onResult: result => {
         latestHeartbeat.current = result.heartbeat; failures = 0;
-        setHeartbeat(result.heartbeat); setServerWatchlist(result.watchlist);
+        setHeartbeat(result.heartbeat); setServerWatchlist(result.watchlist); setSettings((cur) => cur.atrPeriod === result.atrPeriod ? cur : { ...cur, atrPeriod: result.atrPeriod });
         if (running) setSignals(result.signals);
         setLastRead(Date.now()); setClock(Date.now()); setConnectionError("");
         setConn(heartbeatFresh(result.heartbeat) ? "connected" : "error");
@@ -139,7 +140,7 @@ function Dashboard() {
           const key = `${s}|${tf}`;
           const cur = advance(prev[key] ?? seedCandles(s), s);
           next[key] = cur;
-          const r = scanLatest(cur, settings.rr);
+          const r = scanLatest(cur, settings.rr, settings.atrPeriod);
           const sk = `${key}|${r?.time}`;
           if (r && !seen.current.has(sk)) {
             seen.current.add(sk);
@@ -195,6 +196,7 @@ function Dashboard() {
         <TabsList className="h-auto flex-wrap justify-start gap-1">
           <TabsTrigger value="scanner">Scanner</TabsTrigger>
           <TabsTrigger value="signals">Signals & Orders</TabsTrigger>
+          <TabsTrigger value="rules">Rules</TabsTrigger>
           <TabsTrigger value="setup">Symbols & Timeframes</TabsTrigger>
           <TabsTrigger value="settings">VPS Connection</TabsTrigger>
           <TabsTrigger value="deploy">VPS Export</TabsTrigger>
@@ -229,6 +231,16 @@ function Dashboard() {
         </TabsContent>
 
         <TabsContent value="signals" className="mt-4"><SignalTable signals={signals} /></TabsContent>
+
+        <TabsContent value="rules" className="mt-4">
+          <RulesTab atrPeriod={settings.atrPeriod} rr={settings.rr} onAtr={async (n) => {
+            if (!settings.mock && activeConnection) {
+              try { await saveAtrPeriod(activeConnection.url, activeConnection.key, n); toast.success(`ATR(${n}) saved to VPS — scanner restarts with it.`); }
+              catch (e) { toast.error(e instanceof Error ? e.message : "Could not save ATR period."); return; }
+            }
+            setSettings((cur) => ({ ...cur, atrPeriod: n }));
+          }} />
+        </TabsContent>
 
         <TabsContent value="setup" className="mt-4 grid gap-6 md:grid-cols-2">
           {!settings.mock && <div className="md:col-span-2 rounded-md border border-border bg-card p-4"><div className="mb-2 flex flex-wrap items-center justify-between gap-3"><h2 className="font-semibold">{liveHealthy ? "VPS is scanning" : "VPS scanning not confirmed"} · {pairs.length} feeds</h2><Button onClick={applyToVps} disabled={saving || !activeConnection}>{saving ? "Saving…" : "Save & apply to VPS"}</Button></div>
@@ -315,7 +327,7 @@ function Dashboard() {
           </>}
         </TabsContent>
 
-        <TabsContent value="deploy" className="mt-4"><DeployTab files={deployFiles({ symbols, timeframes: Object.fromEntries(symbols.map((s) => [s, tfsOf(s)])), rr: settings.rr, accountId: settings.accountId })} /></TabsContent>
+        <TabsContent value="deploy" className="mt-4"><DeployTab files={deployFiles({ symbols, timeframes: Object.fromEntries(symbols.map((s) => [s, tfsOf(s)])), rr: settings.rr, accountId: settings.accountId, atrPeriod: settings.atrPeriod })} /></TabsContent>
       </Tabs>
     </div>
   );
@@ -384,6 +396,41 @@ function DeployTab({ files }: { files: Record<string, string> }) {
           <div className="flex gap-2"><Button size="sm" variant="secondary" onClick={() => navigator.clipboard.writeText(files[sel] ?? "")}>Copy</Button><Button size="sm" variant="secondary" onClick={() => download(sel)}>Download</Button></div></div>
         <pre className="max-h-[560px] overflow-auto p-4 font-mono text-xs leading-relaxed">{files[sel] ?? ""}</pre>
       </div>
+    </div>
+  );
+}
+
+function RulesTab({ atrPeriod, rr, onAtr }: { atrPeriod: number; rr: number; onAtr: (n: number) => void }) {
+  const rules = [
+    ["Leg-in", `True Range > ATR(${atrPeriod}); body ≥ 60% of range (80:20 perfect, 70:30 average, 60:40 normal).`],
+    ["Boring base", `1 to 3 consecutive candles; each True Range < ATR(${atrPeriod}) and body < 50% of range.`],
+    ["Leg-out", `Within 1–3 candles after the base; True Range > ATR(${atrPeriod}); body ≥ 60% of range.`],
+    ["Size", "Leg-in True Range ≥ 2× the largest boring candle; leg-out True Range ≥ 2× leg-in."],
+    ["Volume", "Leg-in volume > every boring candle; leg-out volume > leg-in."],
+    ["Zone", "Zone high = highest high of the boring candles; zone low = lowest low."],
+    ["Bullish (RBR / DBR)", `Buy Limit at zone high, Stop Loss at zone low, Target ${rr}R.`],
+    ["Bearish (RBD / DBD)", `Sell Limit at zone low, Stop Loss at zone high, Target ${rr}R.`],
+  ];
+  return (
+    <div className="grid gap-6 md:grid-cols-[280px_1fr]">
+      <div className="space-y-3 rounded-md border border-border bg-card p-4">
+        <h3 className="text-sm font-semibold">ATR period</h3>
+        <p className="text-xs text-muted-foreground">True Range = max(High−Low, |High−prev Close|, |Low−prev Close|). ATR = average True Range of the previous N candles.</p>
+        <div className="flex gap-2">
+          {[14, 100].map((n) => (
+            <Button key={n} size="sm" variant={atrPeriod === n ? "default" : "outline"} onClick={() => onAtr(n)}>ATR {n}</Button>
+          ))}
+        </div>
+        <p className="font-mono text-xs">Active: ATR({atrPeriod})</p>
+      </div>
+      <ol className="space-y-2">
+        {rules.map(([t, d], i) => (
+          <li key={t} className="rounded-md border border-border bg-card p-3 text-sm">
+            <span className="mr-2 font-mono text-xs text-muted-foreground">{i + 1}.</span><span className="font-semibold">{t}</span>
+            <p className="mt-1 text-muted-foreground">{d}</p>
+          </li>
+        ))}
+      </ol>
     </div>
   );
 }

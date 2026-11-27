@@ -39,3 +39,31 @@ describe("Legin-Boring-Legout", () => {
     expect(orderLevels("RBD", 10, 8, 2)).toMatchObject({ side: "SELL", limit: 8, sl: 10, tp: 4 });
   });
 });
+
+describe("multi-candle base and ATR period", () => {
+  it("accepts a 2-candle base and uses its combined high/low", () => {
+    const c = flat(20);
+    c.push({ t: 20, o: 100, h: 104.2, l: 99.8, c: 104, v: 200 });
+    c.push({ t: 21, o: 104, h: 105, l: 103, c: 104.2, v: 120 });
+    c.push({ t: 22, o: 104, h: 104.6, l: 102.6, c: 103.8, v: 110 });
+    c.push({ t: 23, o: 104, h: 113.2, l: 103.8, c: 113, v: 400 });
+    const r = detectAt(c, 20)!;
+    expect(r.boringCount).toBe(2);
+    expect(r.limit).toBe(105);
+    expect(r.sl).toBe(102.6);
+  });
+  it("rejects a 4-candle base", () => {
+    const c = flat(20);
+    c.push({ t: 20, o: 100, h: 104.2, l: 99.8, c: 104, v: 200 });
+    for (let k = 0; k < 4; k++) c.push({ t: 21 + k, o: 104, h: 104.8, l: 103.4, c: 104.1, v: 110 });
+    c.push({ t: 25, o: 104, h: 113.2, l: 103.8, c: 113, v: 400 });
+    expect(detectAt(c, 20)).toBeNull();
+  });
+  it("ATR period changes the result", () => {
+    const c = flat(120).map((x, i) => (i < 100 ? { ...x, h: 106, l: 94 } : x));
+    const legin = { t: 120, o: 100, h: 104.2, l: 99.8, c: 104, v: 200 };
+    c.push(legin, { t: 121, o: 104, h: 105, l: 103, c: 104.2, v: 120 }, { t: 122, o: 104, h: 113.2, l: 103.8, c: 113, v: 400 });
+    expect(detectAt(c, 120, 2, 14)).not.toBeNull();
+    expect(detectAt(c, 120, 2, 100)).toBeNull();
+  });
+});

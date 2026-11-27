@@ -23,28 +23,37 @@ export const bodyRatio = (c: Candle) => (c.h - c.l === 0 ? 0 : Math.abs(c.c - c.
 export const MIN_BODY_RATIO = 0.6;
 export const gradeBody = (r: number) => (r >= 0.8 ? "Perfect" : r >= 0.7 ? "Average" : r >= 0.6 ? "Normal" : "Weak");
 
-/** Legin–Boring–Legout check for a pattern whose legin is at index i. */
+export const ATR_PERIODS = [14, 100] as const;
+export const MAX_BORING = 3;
+export const BORING_MAX_BODY = 0.5;
+
+/** Legin–Boring–Legout check for a pattern whose legin is at index i.
+ *  Base = 1..3 consecutive boring candles; zone = highest high / lowest low of the base. */
 export function detectAt(candles: Candle[], i: number, rrMultiple = 2, period = 14) {
-  const legin = candles[i], base = candles[i + 1];
-  if (!legin || !base || i < 1) return null;
+  const legin = candles[i];
+  if (!legin || i < 1) return null;
   const trIn = trueRange(legin, candles[i - 1]!);
-  const trBase = trueRange(base, legin);
   if (!(trIn > atrAt(candles, i, period)) || bodyRatio(legin) < MIN_BODY_RATIO) return null;
-  if (!(trBase < atrAt(candles, i + 1, period))) return null;
-  if (bodyRatio(base) >= 0.5) return null; // boring body must be small
-  if (trIn < 2 * trBase) return null;
-  if (!(legin.v > base.v)) return null;
-  for (let k = 1 as 1 | 2 | 3; k <= 3; k = (k + 1) as 1 | 2 | 3) {
-    const out = candles[i + 1 + k];
-    if (!out) break;
-    const trOut = trueRange(out, candles[i + k]!);
-    if (trOut > atrAt(candles, i + 1 + k, period) && bodyRatio(out) >= MIN_BODY_RATIO && trOut >= 2 * trIn && out.v > legin.v) {
-      const inUp = legin.c > legin.o, outUp = out.c > out.o;
-      const type: PatternType = outUp ? (inUp ? "RBR" : "DBR") : inUp ? "RBD" : "DBD";
-      return { ...orderLevels(type, base.h, base.l, rrMultiple), type, boringHigh: base.h, boringLow: base.l,
-        bodyRatioLegin: bodyRatio(legin), bodyRatioLegout: bodyRatio(out), legoutIndex: k, time: out.t };
+  let zoneH = -Infinity, zoneL = Infinity, maxTrBase = 0;
+  for (let n = 1; n <= MAX_BORING; n++) {
+    const bi = i + n, base = candles[bi];
+    if (!base) return null;
+    const trBase = trueRange(base, candles[bi - 1]!);
+    if (!(trBase < atrAt(candles, bi, period)) || bodyRatio(base) >= BORING_MAX_BODY || !(legin.v > base.v)) return null;
+    zoneH = Math.max(zoneH, base.h); zoneL = Math.min(zoneL, base.l); maxTrBase = Math.max(maxTrBase, trBase);
+    if (trIn < 2 * maxTrBase) return null;
+    {
+      const k = n as 1 | 2 | 3; // legout comes right after the base: 1st, 2nd or 3rd candle after the legin's base start
+      const oi = bi + 1, out = candles[oi];
+      if (!out) return null;
+      const trOut = trueRange(out, candles[oi - 1]!);
+      if (trOut > atrAt(candles, oi, period) && bodyRatio(out) >= MIN_BODY_RATIO && trOut >= 2 * trIn && out.v > legin.v) {
+        const inUp = legin.c > legin.o, outUp = out.c > out.o;
+        const type: PatternType = outUp ? (inUp ? "RBR" : "DBR") : inUp ? "RBD" : "DBD";
+        return { ...orderLevels(type, zoneH, zoneL, rrMultiple), type, boringHigh: zoneH, boringLow: zoneL, boringCount: n,
+          bodyRatioLegin: bodyRatio(legin), bodyRatioLegout: bodyRatio(out), legoutIndex: k, time: out.t };
+      }
     }
-    if (k === 3) break;
   }
   return null;
 }
@@ -59,9 +68,9 @@ export function orderLevels(type: PatternType, boringHigh: number, boringLow: nu
 }
 
 /** Scan the most recent candles; returns the latest completed pattern if any. */
-export function scanLatest(candles: Candle[], rrMultiple = 2) {
-  for (let i = candles.length - 3; i >= Math.max(1, candles.length - 8); i--) {
-    const r = detectAt(candles, i, rrMultiple);
+export function scanLatest(candles: Candle[], rrMultiple = 2, period = 14) {
+  for (let i = candles.length - 3; i >= Math.max(1, candles.length - 10); i--) {
+    const r = detectAt(candles, i, rrMultiple, period);
     if (r) return r;
   }
   return null;
