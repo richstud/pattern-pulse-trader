@@ -23,8 +23,22 @@ export function connectionIssue(error: unknown, aborted: boolean): string {
   return "Unexpected VPS response. Check the API address and server version. Retrying automatically…";
 }
 
-export function scannerState(healthy: boolean, running: boolean, pattern?: string): string {
-  return !healthy ? "OFFLINE" : !running ? "PAUSED" : pattern ?? "SCANNING";
+/** Patterns older than this revert the scanner cell to SCANNING. */
+export const SIGNAL_MAX_AGE_MS = 2 * 60 * 60 * 1000;
+
+export function signalExpired(time: number, now = Date.now()): boolean {
+  return now - time >= SIGNAL_MAX_AGE_MS;
+}
+
+export function scannerState(healthy: boolean, running: boolean, pattern?: string, signalTime?: number, now = Date.now()): string {
+  if (!healthy) return "OFFLINE";
+  if (!running) return "PAUSED";
+  if (pattern && signalTime !== undefined && signalExpired(signalTime, now)) return "SCANNING";
+  return pattern ?? "SCANNING";
+}
+
+export function formatSignalTime(time: number): string {
+  return new Date(time).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit" });
 }
 
 /** A single timeout must not invalidate a still-fresh heartbeat. */

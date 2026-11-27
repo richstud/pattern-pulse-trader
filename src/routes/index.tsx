@@ -12,7 +12,7 @@ import { scanLatest, gradeBody, type Candle, type Signal } from "@/lib/patterns"
 import { SYMBOLS, SYMBOL_GROUPS, TIMEFRAMES, MAX_SYMBOLS, MAX_TIMEFRAMES, seedCandles, advance, digits } from "@/lib/mock-feed";
 import { readVps, saveWatchlist, saveAtrPeriod, timeframeCode, heartbeatFresh, timeframeLabel, type Heartbeat, type DisplaySignal } from "@/lib/vps-feed";
 import { deployFiles } from "@/lib/deploy-files";
-import { CONNECTION_STORAGE_KEY, restoreConnection, rememberConnection, connectionIssue, scannerState, reportFailure, startVpsPolling } from "@/lib/vps-connection";
+import { CONNECTION_STORAGE_KEY, restoreConnection, rememberConnection, connectionIssue, scannerState, formatSignalTime, reportFailure, startVpsPolling } from "@/lib/vps-connection";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -334,7 +334,7 @@ function Dashboard() {
 }
 
 function Cell({ candles, sig, live, healthy, running }: { candles?: Candle[] | undefined; sig?: DisplaySignal | undefined; live: boolean; healthy: boolean; running: boolean }) {
-  const state = live ? scannerState(healthy, running, sig?.type) : scannerState(true, running, sig?.type);
+  const state = scannerState(live ? healthy : true, running, sig?.type, sig?.time);
   const fresh = (!live || healthy) && sig && Date.now() - sig.time < 15000;
   const pts = candles?.slice(-30) ?? [];
   const lo = Math.min(...pts.map((c) => c.l)), hi = Math.max(...pts.map((c) => c.h));
@@ -358,7 +358,7 @@ function SignalTable({ signals }: { signals: DisplaySignal[] }) {
         <tbody>
           {signals.map((s) => { const d = digits(s.symbol); return (
             <tr key={s.id} className="border-t border-border">
-              <td className="px-3 py-2">{new Date(s.time).toLocaleTimeString()}</td>
+              <td className="whitespace-nowrap px-3 py-2">{formatSignalTime(s.time)}</td>
               <td className="px-3 py-2 font-semibold">{s.symbol}</td>
               <td className="px-3 py-2">{s.tf}</td>
               <td className="px-3 py-2">{s.type} {s.legoutIndex && <span className="text-muted-foreground">L{s.legoutIndex}</span>}</td>

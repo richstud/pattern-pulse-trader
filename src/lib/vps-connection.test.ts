@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CONNECTION_STORAGE_KEY, rememberConnection, restoreConnection, reportFailure, scannerState, startVpsPolling } from "./vps-connection";
+import { SIGNAL_MAX_AGE_MS, CONNECTION_STORAGE_KEY, rememberConnection, restoreConnection, reportFailure, scannerState, startVpsPolling } from "./vps-connection";
 import { heartbeatFresh } from "./vps-feed";
 
 afterEach(() => { vi.useRealTimers(); localStorage.clear(); });
@@ -79,5 +79,13 @@ describe("scanner health", () => {
     const heartbeat = { connected: true, updated_at: "2026-11-27T08:00:00Z", detail: "ready" };
     expect(scannerState(heartbeatFresh(heartbeat, start + 89_999), true)).toBe("SCANNING");
     expect(scannerState(heartbeatFresh(heartbeat, start + 90_000), true)).toBe("OFFLINE");
+  });
+});
+
+describe("signal aging", () => {
+  it("shows a pattern until it is 2 hours old, then reverts to SCANNING", () => {
+    const t = Date.parse("2026-11-26T16:21:00Z");
+    expect(scannerState(true, true, "RBR", t, t + SIGNAL_MAX_AGE_MS - 1)).toBe("RBR");
+    expect(scannerState(true, true, "RBR", t, t + SIGNAL_MAX_AGE_MS)).toBe("SCANNING");
   });
 });

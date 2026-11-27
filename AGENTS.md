@@ -33,3 +33,4 @@ use the editor.
 - VPS backend lives in vps/ (Docker Compose: Postgres + FastAPI + Twisted cTrader engine); vps/app/patterns.py must mirror src/lib/patterns.ts. Netlify serves static files only and proxies /api/* to the VPS via netlify.toml — no Netlify Functions, to keep all compute on the VPS.
 - Dashboard VPS reads use the browser-only adapter in src/lib/vps-feed.ts; require HTTPS from HTTPS pages and derive watchlists and order states from the VPS without inventing candles or fills because the current API exposes no candle stream.
 - Keep connection persistence and retry lifecycle in src/lib/vps-connection.ts; restore storage only after hydration and save only successful connections so invalid keys do not replace remembered credentials.
+- Scanner cells show a pattern only for SIGNAL_MAX_AGE_MS (src/lib/vps-connection.ts) after the signal time; older signals stay in the Signals table but the cell reverts to SCANNING, so stale patterns never look current.
