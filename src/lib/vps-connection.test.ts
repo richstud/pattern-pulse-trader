@@ -83,8 +83,9 @@ describe("scanner health", () => {
 });
 
 describe("signal aging", () => {
-  it("shows a pattern until it is 2 hours old, then reverts to SCANNING", () => {
+  it("shows a pattern until it is 5 minutes old, then reverts to SCANNING", () => {
     const t = Date.parse("2026-11-26T16:21:00Z");
+    expect(SIGNAL_MAX_AGE_MS).toBe(5 * 60 * 1000);
     expect(scannerState(true, true, "RBR", t, t + SIGNAL_MAX_AGE_MS - 1)).toBe("RBR");
     expect(scannerState(true, true, "RBR", t, t + SIGNAL_MAX_AGE_MS)).toBe("SCANNING");
   });

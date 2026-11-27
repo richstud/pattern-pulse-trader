@@ -24,7 +24,7 @@ export function connectionIssue(error: unknown, aborted: boolean): string {
 }
 
 /** Patterns older than this revert the scanner cell to SCANNING. */
-export const SIGNAL_MAX_AGE_MS = 2 * 60 * 60 * 1000;
+export const SIGNAL_MAX_AGE_MS = 5 * 60 * 1000;
 
 export function signalExpired(time: number, now = Date.now()): boolean {
   return now - time >= SIGNAL_MAX_AGE_MS;
