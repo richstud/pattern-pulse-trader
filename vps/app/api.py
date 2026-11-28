@@ -36,6 +36,14 @@ def signals(limit: int = 100):
         cols = [d.name for d in cur.description]
         return [dict(zip(cols, row)) | {"created_at": row[1].isoformat()} for row in cur.fetchall()]
 
+@app.get("/rejections", dependencies=[Depends(auth)])
+def rejections(limit: int = 100):
+    with db.conn() as c:
+        cur = c.execute("""select id, created_at, symbol, timeframe, legin_ts, end_ts, boring_count, legout_count,
+            tr_legin, atr_legin, reason from rejections order by id desc limit %s""", (min(limit, 500),))
+        cols = [d.name for d in cur.description]
+        return [dict(zip(cols, row)) | {"created_at": row[1].isoformat()} for row in cur.fetchall()]
+
 @app.get("/config", dependencies=[Depends(auth)])
 def config():
     return yaml.safe_load(open("config.yaml"))

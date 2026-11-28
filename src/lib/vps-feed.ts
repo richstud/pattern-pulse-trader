@@ -12,6 +12,13 @@ const signalSchema = z.object({
   boring_high: z.coerce.number(), boring_low: z.coerce.number(), limit_price: z.coerce.number(),
   sl: z.coerce.number(), tp: z.coerce.number(), status: z.string(), note: z.string().nullable(),
 });
+const rejectionSchema = z.object({
+  id: z.number(), created_at: z.string(), symbol: z.string(), timeframe: z.string(),
+  boring_count: z.number().nullable(), legout_count: z.number().nullable(),
+  tr_legin: z.coerce.number().nullable(), atr_legin: z.coerce.number().nullable(), reason: z.string(),
+});
+/** A Legin–Boring–Legout setup that was detected but failed a rule. */
+export type DisplayRejection = { id: string; symbol: string; tf: string; boringCount: number; legoutCount: number; trLegin?: number | undefined; atrLegin?: number | undefined; reason: string; time: number };
 export type Heartbeat = z.infer<typeof heartbeatSchema>;
 export type DisplaySignal = Omit<Signal, "status" | "legoutIndex" | "bodyRatioLegin" | "bodyRatioLegout"> & {
   status: string; legoutIndex?: 1 | 2 | 3; bodyRatioLegin?: number; bodyRatioLegout?: number; note?: string;
@@ -45,7 +52,11 @@ export async function readVps(base: string, key: string, signal: AbortSignal) {
     if (!type.includes("application/json")) throw new Error("No VPS API at this address. /api works on Netlify only; this preview needs an HTTPS VPS address.");
     return response.json();
   }
-  const [status, config, rows] = await Promise.all([read("status"), read("config"), read("signals?limit=100")]);
+  // Older VPS builds have no /rejections endpoint; show none instead of failing the whole read.
+  const [status, config, rows, rejectRows] = await Promise.all([read("status"), read("config"), read("signals?limit=100"), read("rejections?limit=200").catch((e: unknown) => {
+    if (e instanceof Error && e.message.startsWith("VPS API not found")) return [];
+    throw e;
+  })]);
   const heartbeat = heartbeatSchema.parse(status);
   const parsedConfig = configSchema.parse(config);
   const watchlist = parsedConfig.watchlist;
@@ -56,7 +67,12 @@ export async function readVps(base: string, key: string, signal: AbortSignal) {
     rr: Math.abs(row.limit_price - row.sl) ? Number((Math.abs(row.tp - row.limit_price) / Math.abs(row.limit_price - row.sl)).toFixed(2)) : 0,
     time: Date.parse(row.created_at), status: row.status.toUpperCase(), note: row.note ?? "",
   }));
-  return { heartbeat, watchlist, signals, atrPeriod };
+  const rejections: DisplayRejection[] = z.array(rejectionSchema).parse(rejectRows).map(row => ({
+    id: `vps-r-${row.id}`, symbol: row.symbol, tf: timeframeLabel(row.timeframe), boringCount: row.boring_count ?? 0,
+    legoutCount: row.legout_count ?? 0, trLegin: row.tr_legin ?? undefined, atrLegin: row.atr_legin ?? undefined,
+    reason: row.reason, time: Date.parse(row.created_at),
+  }));
+  return { heartbeat, watchlist, signals, atrPeriod, rejections };
 }
 const SUPPORTED = new Set(["S1","S5","S10","S15","S30","S45","M1","M2","M3","M4","M5","M10","M15","M30","M45","M75","M125","H1","H2","H4","H12","D1","W1"]);
 /** "15 SEC" -> "S15", "1 HR" -> "H1"; null when the VPS engine cannot scan that timeframe. */

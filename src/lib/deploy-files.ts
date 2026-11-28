@@ -1,3 +1,4 @@
+import patternsPy from "../../vps/app/patterns.py?raw";
 export const deployFiles = (cfg: { symbols: string[]; timeframes: Record<string, string[]>; rr: number; accountId: string; atrPeriod?: number }) => ({
   Dockerfile: `FROM python:3.12-slim
 WORKDIR /app
@@ -36,31 +37,9 @@ and place LIMIT orders: bullish limit=boring high SL=boring low; bearish limit=b
 import os, yaml
 cfg = yaml.safe_load(open("config.yaml"))
 
-def tr(c, p): return max(c["h"]-c["l"], abs(c["h"]-p["c"]), abs(c["l"]-p["c"]))
-def atr(cs, i, n=14):
-    r = [tr(cs[k], cs[k-1]) for k in range(max(1, i-n), i)]
-    return sum(r)/len(r) if r else cs[i]["h"]-cs[i]["l"]
-def body(c): return abs(c["c"]-c["o"])/(c["h"]-c["l"]) if c["h"]>c["l"] else 0
-
-def detect(cs, i):
-    li, b = cs[i], cs[i+1]
-    if not (tr(li, cs[i-1]) > atr(cs, i) and body(li) >= cfg["min_body_ratio"]): return None
-    if not (tr(b, li) < atr(cs, i+1) and body(b) < 0.5 and li["v"] > b["v"]): return None
-    if tr(li, cs[i-1]) < cfg["size_multiple"]*tr(b, li): return None
-    for k in range(1, cfg["max_legout_offset"]+1):
-        if i+1+k >= len(cs): break
-        o = cs[i+1+k]
-        if tr(o, cs[i+k]) > atr(cs, i+1+k) and body(o) >= cfg["min_body_ratio"] \\
-           and tr(o, cs[i+k]) >= cfg["size_multiple"]*tr(li, cs[i-1]) and o["v"] > li["v"]:
-            bull = o["c"] > o["o"]
-            limit, sl = (b["h"], b["l"]) if bull else (b["l"], b["h"])
-            risk = abs(limit-sl)
-            tp = limit + risk*cfg["reward_risk"] if bull else limit - risk*cfg["reward_risk"]
-            return {"side": "BUY" if bull else "SELL", "limit": limit, "sl": sl, "tp": tp}
-    return None
-
+${patternsPy}
 if __name__ == "__main__":
     print("Connect with ctrader-open-api using env credentials", os.environ.get("CTRADER_HOST"))
     # TODO: ProtoOAApplicationAuthReq -> ProtoOAAccountAuthReq -> ProtoOASubscribeLiveTrendbarReq
-    # on bar close: sig = detect(bars, len(bars)-3); if sig: ProtoOANewOrderReq(orderType=LIMIT, ...)`,
+    # on bar close: sig = evaluate(bars, i, cfg) for recent i; if r and r["ok"]: ProtoOANewOrderReq(orderType=LIMIT, ...)`,
 });

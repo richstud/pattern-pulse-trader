@@ -8,9 +8,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { scanLatest, gradeBody, type Candle, type Signal } from "@/lib/patterns";
+import { scanLatest, rejectionsLatest, gradeBody, type Candle, type Signal } from "@/lib/patterns";
 import { SYMBOLS, SYMBOL_GROUPS, TIMEFRAMES, MAX_SYMBOLS, MAX_TIMEFRAMES, seedCandles, advance, digits } from "@/lib/mock-feed";
-import { readVps, saveWatchlist, saveAtrPeriod, timeframeCode, heartbeatFresh, timeframeLabel, type Heartbeat, type DisplaySignal } from "@/lib/vps-feed";
+import { readVps, saveWatchlist, saveAtrPeriod, timeframeCode, heartbeatFresh, timeframeLabel, type Heartbeat, type DisplaySignal, type DisplayRejection } from "@/lib/vps-feed";
 import { deployFiles } from "@/lib/deploy-files";
 import { CONNECTION_STORAGE_KEY, restoreConnection, rememberConnection, connectionIssue, scannerState, formatSignalTime, reportFailure, startVpsPolling } from "@/lib/vps-connection";
 
@@ -75,6 +75,7 @@ function Dashboard() {
   const allTfs = useMemo(() => [...new Set(pairs.map(([, tf]) => tf))], [pairs]);
   const [series, setSeries] = useState<Record<string, Candle[]>>({});
   const [signals, setSignals] = useState<DisplaySignal[]>([]);
+  const [rejections, setRejections] = useState<DisplayRejection[]>([]);
   const [running, setRunning] = useState(true);
   const [conn, setConn] = useState<"disconnected" | "connecting" | "connected" | "error">("disconnected");
   const seen = useRef(new Set<string>());
@@ -92,7 +93,7 @@ function Dashboard() {
     } catch { setStorageNotice("This browser cannot remember your connection. Keep this page open or allow site storage."); }
   }, []);
   useEffect(() => {
-    setSeries({}); setSignals([]); seen.current.clear();
+    setSeries({}); setSignals([]); setRejections([]); seen.current.clear();
   }, [settings.mock]);
 
   useEffect(() => {
@@ -104,7 +105,7 @@ function Dashboard() {
       onResult: result => {
         latestHeartbeat.current = result.heartbeat; failures = 0;
         setHeartbeat(result.heartbeat); setServerWatchlist(result.watchlist); setSettings((cur) => cur.atrPeriod === result.atrPeriod ? cur : { ...cur, atrPeriod: result.atrPeriod });
-        if (running) setSignals(result.signals);
+        if (running) { setSignals(result.signals); setRejections(result.rejections); }
         setLastRead(Date.now()); setClock(Date.now()); setConnectionError("");
         setConn(heartbeatFresh(result.heartbeat) ? "connected" : "error");
         if (!heartbeatFresh(result.heartbeat)) setConnectionError(result.heartbeat.connected
@@ -136,10 +137,13 @@ function Dashboard() {
       setSeries((prev) => {
         const next: Record<string, Candle[]> = {};
         const found: Signal[] = [];
+        const failed: DisplayRejection[] = [];
         for (const [s, tf] of pairs) {
           const key = `${s}|${tf}`;
           const cur = advance(prev[key] ?? seedCandles(s), s);
           next[key] = cur;
+          for (const f of rejectionsLatest(cur, settings.rr, settings.atrPeriod))
+            failed.push({ ...f, id: `${key}|${f.leginTime}|rej`, symbol: s, tf, time: Date.now() });
           const r = scanLatest(cur, settings.rr, settings.atrPeriod);
           const sk = `${key}|${r?.time}`;
           if (r && !seen.current.has(sk)) {
@@ -147,6 +151,7 @@ function Dashboard() {
             found.push({ ...r, id: sk, symbol: s, tf, time: Date.now(), status: settings.autoExecute ? "PLACED" : "PENDING" });
           }
         }
+        if (failed.length) setRejections((old) => [...failed, ...old].slice(0, 200));
         if (found.length) setSignals((old) => [...found, ...old].slice(0, 100));
         return next;
       });
@@ -196,6 +201,7 @@ function Dashboard() {
         <TabsList className="h-auto flex-wrap justify-start gap-1">
           <TabsTrigger value="scanner">Scanner</TabsTrigger>
           <TabsTrigger value="signals">Signals & Orders</TabsTrigger>
+          <TabsTrigger value="detected">Detected Trades</TabsTrigger>
           <TabsTrigger value="rules">Rules</TabsTrigger>
           <TabsTrigger value="setup">Symbols & Timeframes</TabsTrigger>
           <TabsTrigger value="settings">VPS Connection</TabsTrigger>
@@ -231,6 +237,8 @@ function Dashboard() {
         </TabsContent>
 
         <TabsContent value="signals" className="mt-4"><SignalTable signals={signals} /></TabsContent>
+
+        <TabsContent value="detected" className="mt-4"><RejectionTable rejections={rejections} /></TabsContent>
 
         <TabsContent value="rules" className="mt-4">
           <RulesTab atrPeriod={settings.atrPeriod} rr={settings.rr} onAtr={async (n) => {
@@ -303,10 +311,10 @@ function Dashboard() {
             <h2 className="mb-2 font-semibold">Pattern rules</h2>
             <ul className="grid gap-1 text-muted-foreground md:grid-cols-2">
               <li>• Legin: TR &gt; ATR(14), body ≥ 60% (80:20 perfect, 70:30 average, 60:40 normal)</li>
-              <li>• Boring: TR &lt; ATR, small body</li>
-              <li>• Legout (1st–3rd candle after base): TR &gt; ATR, body ≥ 60%</li>
-              <li>• Size: Legin ≥ 2× Boring, Legout ≥ 2× Legin</li>
-              <li>• Volume: Legout &gt; Legin &gt; Boring</li>
+              <li>• Boring (1–3): every candle TR &lt; ATR, small body</li>
+              <li>• Legout (1–3 candles): every candle TR &gt; ATR, body ≥ 60%, gap ≤ 0.1%</li>
+              <li>• Size (High−Low): Legin ≥ 2× Boring, Legout total ≥ 2× Legin</li>
+              <li>• Volume: each Legout &gt; Legin &gt; Boring</li><li>• Failed setups are listed in Detected Trades with the reason</li>
               <li>• Buy: limit = boring high, SL = boring low · Sell: limit = boring low, SL = boring high</li>
             </ul>
           </section>
@@ -378,6 +386,34 @@ function SignalTable({ signals }: { signals: DisplaySignal[] }) {
   );
 }
 
+function RejectionTable({ rejections }: { rejections: DisplayRejection[] }) {
+  return (
+    <div className="space-y-3">
+      <p className="text-sm text-muted-foreground">Setups where a Legin and Boring candle were found but a rule failed, so no order was placed.</p>
+      {!rejections.length ? <p className="rounded-md border border-dashed border-border p-6 text-center text-sm text-muted-foreground">No failed setups yet.</p> :
+      <div className="overflow-x-auto rounded-md border border-border">
+        <table className="w-full font-mono text-xs">
+          <thead className="bg-card text-muted-foreground"><tr>{["TIME", "SYMBOL", "TF", "BORING", "LEGOUT", "LEGIN TR", "LEGIN ATR", "STATUS", "WHY IT FAILED"].map((h) => <th key={h} className="px-3 py-2 text-left">{h}</th>)}</tr></thead>
+          <tbody>
+            {rejections.map((r) => { const d = digits(r.symbol); return (
+              <tr key={r.id} className="border-t border-border">
+                <td className="whitespace-nowrap px-3 py-2">{formatSignalTime(r.time)}</td>
+                <td className="px-3 py-2 font-semibold">{r.symbol}</td>
+                <td className="px-3 py-2">{r.tf}</td>
+                <td className="px-3 py-2">{r.boringCount}</td>
+                <td className="px-3 py-2">{r.legoutCount}</td>
+                <td className="px-3 py-2">{r.trLegin?.toFixed(d) ?? "—"}</td>
+                <td className="px-3 py-2">{r.atrLegin?.toFixed(d) ?? "—"}</td>
+                <td className="px-3 py-2"><Badge variant="destructive">FAILED</Badge></td>
+                <td className="min-w-64 px-3 py-2 text-bear">{r.reason}</td>
+              </tr>); })}
+          </tbody>
+        </table>
+      </div>}
+    </div>
+  );
+}
+
 function DeployTab({ files }: { files: Record<string, string> }) {
   const names = Object.keys(files);
   const [sel, setSel] = useState<string>(names[0] ?? "");
@@ -403,9 +439,9 @@ function DeployTab({ files }: { files: Record<string, string> }) {
 function RulesTab({ atrPeriod, rr, onAtr }: { atrPeriod: number; rr: number; onAtr: (n: number) => void }) {
   const rules = [
     ["Leg-in", `True Range > ATR(${atrPeriod}); body ≥ 60% of range (80:20 perfect, 70:30 average, 60:40 normal).`],
-    ["Boring base", `1 to 3 consecutive candles; each True Range < ATR(${atrPeriod}) and body < 50% of range.`],
-    ["Leg-out", `Within 1–3 candles after the base; True Range > ATR(${atrPeriod}); body ≥ 60% of range.`],
-    ["Size", "Leg-in True Range ≥ 2× the largest boring candle; leg-out True Range ≥ 2× leg-in."],
+    ["Boring base", `1 to 3 consecutive small-body candles (body < 50%); every one must have True Range < ATR(${atrPeriod}), otherwise the setup is rejected.`],
+    ["Leg-out", `1 to 3 candles right after the base, same direction, each opening within 0.1% of the previous close; every one must have True Range > ATR(${atrPeriod}) and body ≥ 60%, otherwise the setup is rejected.`],
+    ["Size (wick to wick)", "Candle size = High − Low. Leg-in ≥ 2× each boring candle; leg-out size (1st candle, or 1st+2nd, or 1st+2nd+3rd, whichever comes first) ≥ 2× leg-in."],
     ["Volume", "Leg-in volume > every boring candle; leg-out volume > leg-in."],
     ["Zone", "Zone high = highest high of the boring candles; zone low = lowest low."],
     ["Bullish (RBR / DBR)", `Buy Limit at zone high, Stop Loss at zone low, Target ${rr}R.`],

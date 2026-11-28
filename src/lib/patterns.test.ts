@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { detectAt, orderLevels, type Candle } from "./patterns";
+import { detectAt, evaluateAt, rejectionsLatest, orderLevels, type Candle } from "./patterns";
 
 const flat = (n: number): Candle[] => Array.from({ length: n }, (_, i) => ({ t: i, o: 100, h: 101, l: 99, c: 100.2, v: 100 }));
 const build = (leginUp: boolean, outUp: boolean, outVol = 400) => {
@@ -65,5 +65,35 @@ describe("multi-candle base and ATR period", () => {
     c.push(legin, { t: 121, o: 104, h: 105, l: 103, c: 104.2, v: 120 }, { t: 122, o: 104, h: 113.2, l: 103.8, c: 113, v: 400 });
     expect(detectAt(c, 120, 2, 14)).not.toBeNull();
     expect(detectAt(c, 120, 2, 100)).toBeNull();
+  });
+});
+
+describe("multi-candle legout and rejection reasons", () => {
+  const head = () => {
+    const c = flat(20);
+    c.push({ t: 20, o: 100, h: 104.2, l: 99.8, c: 104, v: 200 }, { t: 21, o: 104, h: 105, l: 103, c: 104.2, v: 120 });
+    return c;
+  };
+  const out1 = { t: 22, o: 104, h: 109, l: 103.8, c: 108.8, v: 400 };
+  it("reaches 2× legin size over two legout candles", () => {
+    const c = [...head(), out1, { t: 23, o: 108.8, h: 113, l: 108.7, c: 112.9, v: 400 }];
+    const r = evaluateAt(c, 20)!;
+    expect(r.ok && r.signal.legoutIndex).toBe(2);
+  });
+  it("rejects when any legout candle has TR < ATR", () => {
+    const c = [...head(), out1, { t: 23, o: 108.8, h: 110, l: 108.7, c: 109.9, v: 400 }];
+    const r = evaluateAt(c, 20)!;
+    expect(!r.ok && r.rejection.reason).toMatch(/^Legout #2 TR/);
+  });
+  it("rejects when any boring candle has TR > ATR", () => {
+    const c = head();
+    c.push({ t: 22, o: 104, h: 106.5, l: 102, c: 104.1, v: 110 }, { t: 23, o: 104, h: 113.2, l: 103.8, c: 113, v: 400 });
+    const r = evaluateAt(c, 20)!;
+    expect(!r.ok && r.rejection.reason).toMatch(/^Boring #2 TR/);
+  });
+  it("reports a rejection once, on the candle that decides it", () => {
+    const c = [...head(), out1, { t: 23, o: 108.8, h: 110, l: 108.7, c: 109.9, v: 400 }];
+    expect(rejectionsLatest(c)).toHaveLength(1);
+    expect(rejectionsLatest(c.slice(0, -1))).toHaveLength(0);
   });
 });

@@ -10,7 +10,7 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOAGetAccountListByAccessTokenReq, ProtoOASubscribeSpotsReq, ProtoOASpotEvent)
 from ctrader_open_api.messages.OpenApiModelMessages_pb2 import ProtoOATrendbarPeriod, ProtoOAOrderType, ProtoOATradeSide
 from . import db
-from .patterns import detect
+from .patterns import evaluate, MAX_BORING, MAX_LEGOUT
 
 os.makedirs("logs", exist_ok=True)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s",
@@ -317,14 +317,24 @@ def on_message(_, msg):
 def scan_bars(sym, tf, bars):
     if len(bars) < CFG["atr_period"] + 5:
         return
-    # newest completed setup: Legout is the last closed bar, offset 1..3
-    # newest completed setup: legout must be the last closed bar (base 1..3, offset 1..3)
+    # only setups decided on the last closed bar (base 1..3, legout 1..3)
     last = len(bars) - 1
-    for i in range(last - 2, max(0, last - 2 - 3 - CFG["max_legout_offset"]), -1):
-        sig = detect(bars, i, CFG)
-        if sig and sig["end_index"] == last:
-            save(sym, tf, sig)
+    for i in range(last - 1, max(0, last - MAX_BORING - MAX_LEGOUT - 2), -1):
+        r = evaluate(bars, i, CFG)
+        if not r or r["end_index"] != last:
+            continue
+        if r["ok"]:
+            save(sym, tf, r)
             break
+        save_rejection(sym, tf, r)
+
+def save_rejection(sym, tf, r):
+    with db.conn() as c:
+        c.execute("""insert into rejections (symbol,timeframe,legin_ts,end_ts,boring_count,legout_count,
+            tr_legin,atr_legin,reason) values (%s,%s,%s,%s,%s,%s,%s,%s,%s) on conflict do nothing""",
+            (sym, tf, r["legin_ts"], r["end_ts"], r["boring_count"], r["legout_count"],
+             r["tr_legin"], r["atr_legin"], r["reason"]))
+    log.info("REJECTED %s %s %s", sym, tf, r["reason"])
 
 def save(sym, tf, s):
     with db.conn() as c:
